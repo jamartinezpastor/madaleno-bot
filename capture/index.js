@@ -127,34 +127,51 @@ client.on('ready', () => {
   }
 });
 
+// Caché de nombres de grupo: getChat() es una llamada al WhatsApp Web
+// interno y puede fallar (errores minificados tipo "r"). Solo se intenta
+// una vez por chat y su fallo nunca bloquea la captura del mensaje.
+const nombresChat = new Map();
+
+async function nombreDelChat(msg, chatId) {
+  if (nombresChat.has(chatId)) return nombresChat.get(chatId);
+  let nombre = null;
+  try {
+    const chat = await msg.getChat();
+    nombre = (chat && chat.name) || null;
+  } catch (e) {
+    console.error(`[capture] No pude leer el nombre del chat (${e.message})`);
+  }
+  nombresChat.set(chatId, nombre);
+  return nombre;
+}
+
 // 'message_create' se dispara con cualquier mensaje del chat
 // (entrantes y propios), sin necesidad de que tú lo abras/leas.
 client.on('message_create', async (msg) => {
+  // 1) Identificar el grupo SIN llamar a getChat(): el id del chat ya
+  //    viene en el propio mensaje. En un grupo, uno de los dos extremos
+  //    termina en @g.us (from si lo recibes, to si lo envías tú).
+  let chatId = null;
   try {
-    const chat = await msg.getChat();
-    if (!chat.isGroup) return;
+    chatId = [msg.from, msg.to].find((id) => id && id.endsWith('@g.us')) || null;
+  } catch (_) {}
+  if (!chatId) return; // no es un grupo
 
-    const chatId = chat.id._serialized;
+  if (GROUP_IDS.length > 0 && !GROUP_IDS.includes(chatId)) return;
 
-    // Log de descubrimiento: ayuda a encontrar el id del grupo.
-    if (GROUP_IDS.length === 0) {
-      console.log(`[grupo] "${chat.name}"  id=${chatId}`);
-    }
-    if (GROUP_IDS.length > 0 && !GROUP_IDS.includes(chatId)) return;
+  const authorId = msg.author || msg.from || null;
 
-    let authorName = null;
-    try {
-      const contact = await msg.getContact();
-      authorName = contact.pushname || contact.name || contact.number || null;
-    } catch (_) {
-      /* contacto no disponible */
-    }
+  // 2) Guardar el mensaje. Aislado: si algo falla aquí, el bot todavía
+  //    puede responder al comando.
+  try {
+    const authorName =
+      (msg._data && (msg._data.notifyName || msg._data.pushName)) || null;
 
     insertStmt.run({
       id: msg.id._serialized,
       chat_id: chatId,
-      chat_name: chat.name || null,
-      author_id: msg.author || msg.from || null,
+      chat_name: await nombreDelChat(msg, chatId),
+      author_id: authorId,
       author_name: authorName,
       body: msg.body || '',
       type: msg.type || 'chat',
@@ -162,10 +179,22 @@ client.on('message_create', async (msg) => {
       captured_at: Date.now(),
     });
 
-    // ---- Q&A: ¿es una pregunta dirigida al bot por un admin? ----
+    // Log de descubrimiento: ayuda a encontrar el id del grupo y el tuyo.
+    if (GROUP_IDS.length === 0) {
+      console.log(
+        `[grupo] "${nombresChat.get(chatId) || '?'}" id=${chatId} ` +
+          `· autor=${authorId}`
+      );
+    }
+  } catch (err) {
+    console.error('[capture] Error guardando mensaje:', err.stack || err);
+  }
+
+  // 3) Comandos del bot. Con su propio try/catch y trazas completas.
+  try {
     const reply = await qa.handleIncoming(db, {
       body: msg.body || '',
-      authorId: msg.author || msg.from || null,
+      authorId,
       chatId,
       docsDir: DOCS_DIR,
       // El GIF se renderiza con el Chromium que ya usa WhatsApp Web.
@@ -183,13 +212,13 @@ client.on('message_create', async (msg) => {
         // WhatsApp reproduce en bucle los MP4 enviados como "gif"
         sendVideoAsGif: !!m.isVideo,
       });
-      fs.unlink(m.path, () => {});          // limpia el temporal
+      fs.unlink(m.path, () => {}); // limpia el temporal
       if (m.path.endsWith('.mp4')) {
         fs.unlink(m.path.replace(/\.mp4$/, '.gif'), () => {});
       }
     }
   } catch (err) {
-    console.error('[capture] Error guardando mensaje:', err.message);
+    console.error('[capture] Error respondiendo:', err.stack || err);
   }
 });
 
