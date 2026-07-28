@@ -89,16 +89,14 @@ const client = new Client({
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
-      // Reduce el consumo de RAM: importante en un VPS compartido con
-      // otras aplicaciones. Sin esto, Chromium puede ser matado por el
-      // OOM killer y arrastrar al proceso entero.
-      '--no-zygote',
+      // Ahorro moderado de recursos, sin tocar el motor JS: limitar el
+      // heap de V8 aquí puede tumbar WhatsApp Web, que es pesado.
       '--disable-extensions',
       '--disable-background-networking',
       '--disable-background-timer-throttling',
       '--disable-renderer-backgrounding',
-      '--disable-features=site-per-process,TranslateUI',
-      '--js-flags=--max-old-space-size=256',
+      '--disable-accelerated-2d-canvas',
+      '--mute-audio',
     ],
   },
 });
@@ -225,10 +223,60 @@ client.on('message_reaction', (reaction) => {
 let arrancando = false;
 let intentos = 0;
 
+/**
+ * Borra los candados que Chromium deja en el perfil cuando el contenedor
+ * muere de golpe (SIGKILL, OOM, reinicio del servidor...).
+ *
+ * Sin esto, el siguiente arranque falla con "The profile appears to be in
+ * use by another Chromium process ... on another computer", porque el
+ * candado apunta al nombre de máquina del contenedor anterior. Como cada
+ * contenedor tiene un hostname distinto, el bloqueo es permanente y solo
+ * se resuelve a mano. Son ficheros de bloqueo, no datos de sesión: es
+ * seguro borrarlos cuando no hay ningún Chromium vivo, que es justo el
+ * caso al arrancar el proceso.
+ */
+function limpiarCandadosChromium() {
+  const base = path.join(DATA_DIR, 'wweb-session');
+  if (!fs.existsSync(base)) return;
+
+  const nombres = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+  let borrados = 0;
+
+  const limpiarEn = (dir) => {
+    for (const n of nombres) {
+      const f = path.join(dir, n);
+      try {
+        // lstat: SingletonLock es un enlace simbólico "roto" a propósito,
+        // así que existsSync() puede devolver false. Hay que mirar el
+        // enlace en sí, no su destino.
+        fs.lstatSync(f);
+        fs.unlinkSync(f);
+        borrados++;
+      } catch (_) {
+        /* no existe: nada que hacer */
+      }
+    }
+  };
+
+  limpiarEn(base);
+  try {
+    for (const entrada of fs.readdirSync(base, { withFileTypes: true })) {
+      if (entrada.isDirectory()) limpiarEn(path.join(base, entrada.name));
+    }
+  } catch (e) {
+    console.error('[wa] No pude revisar el perfil:', e.message);
+  }
+
+  if (borrados > 0) {
+    console.log(`[wa] Candados de Chromium huérfanos eliminados: ${borrados}`);
+  }
+}
+
 async function arrancarWhatsApp() {
   if (arrancando) return;
   arrancando = true;
   try {
+    limpiarCandadosChromium();
     console.log(`[wa] Inicializando cliente (intento ${intentos + 1})...`);
     await client.initialize();
     intentos = 0;
@@ -380,10 +428,24 @@ app.listen(PORT, () => console.log(`[http] API de captura en :${PORT}`));
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
     console.log(`\n[sys] ${sig} recibido, cerrando...`);
+    // Docker concede ~10s antes del SIGKILL. Si Chromium tarda más en
+    // cerrar, salimos igualmente pero dejando el perfil desbloqueado.
+    const salidaForzosa = setTimeout(() => {
+      console.error('[sys] Cierre lento, forzando salida.');
+      try {
+        limpiarCandadosChromium();
+      } catch (_) {}
+      process.exit(0);
+    }, 8000);
+
     try {
       await client.destroy();
     } catch (_) {}
-    db.close();
+    try {
+      limpiarCandadosChromium();
+      db.close();
+    } catch (_) {}
+    clearTimeout(salidaForzosa);
     process.exit(0);
   });
 }
