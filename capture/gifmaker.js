@@ -26,7 +26,7 @@ const gemini = require('./gemini');
 
 const W = parseInt(process.env.GIF_WIDTH || '480', 10);
 const H = parseInt(process.env.GIF_HEIGHT || '480', 10);
-const FRAME_MS = parseInt(process.env.GIF_FRAME_MS || '1400', 10);
+const FRAME_MS = parseInt(process.env.GIF_FRAME_MS || '1700', 10);
 
 // Paleta de fondos para ir alternando entre escenas.
 const BGS = [
@@ -41,27 +41,48 @@ const BGS = [
 async function guion(transcripcion) {
   const system = `Eres un guionista con humor ácido e ironía fina (nunca
 insultos, nada ofensivo ni personal). Te dan la conversación reciente de un
-grupo de WhatsApp y devuelves un guion cortito para un GIF.
+grupo de WhatsApp y escribes una MICROHISTORIA de tres actos sobre lo que
+ha pasado en el grupo, para animarla en un GIF.
+
+Estructura: acto 1 planteamiento, acto 2 desarrollo (la cosa se tuerce o se
+va de madre), acto 3 desenlace irónico. Que se lea como una historia, con
+continuidad entre actos, no como tres temas sueltos.
+
+MUY IMPORTANTE: poquísimo texto, se lee en 1,5 segundos.
+- "titulo": máximo 2 palabras (idealmente 1).
+- "texto": máximo 28 caracteres. Un golpe seco, sin explicar nada.
+- Prohibido: frases subordinadas, comas de más, "porque", "aunque".
+- "frase" final: máximo 50 caracteres, es la moraleja/remate.
 
 Devuelve SOLO JSON con esta forma exacta:
 {
-  "frase": "una frase corta e irónica que resuma el ambiente del grupo (máx 90 caracteres)",
+  "frase": "remate irónico final",
   "escenas": [
-    {"titulo": "tema en 2-4 palabras", "texto": "coletilla irónica de máx 60 caracteres", "emoji": "un emoji"},
-    ... entre 3 y 4 escenas ...
+    {"titulo": "1-2 palabras", "texto": "máx 28 caracteres", "emoji": "un emoji"},
+    {"titulo": "1-2 palabras", "texto": "máx 28 caracteres", "emoji": "un emoji"},
+    {"titulo": "1-2 palabras", "texto": "máx 28 caracteres", "emoji": "un emoji"}
   ]
 }
-Habla en español. Básate solo en lo que veas en la conversación; si el
-grupo habló poco, ironiza precisamente sobre eso.`;
+Exactamente 3 escenas. En español. Básate solo en lo que veas en la
+conversación; si el grupo habló poco, la historia va precisamente de eso.`;
 
   return gemini.generateJson(system, transcripcion, {
     temperature: 0.9,
-    maxTokens: 600,
+    maxTokens: 500,
   });
 }
 
+/** Recorta sin cortar palabras a media (por si el modelo se pasa). */
+function recortar(s, max) {
+  const t = String(s || '').trim();
+  if (t.length <= max) return t;
+  const corte = t.slice(0, max);
+  const esp = corte.lastIndexOf(' ');
+  return (esp > max * 0.6 ? corte.slice(0, esp) : corte).trim() + '…';
+}
+
 /** HTML de una tarjeta. progreso 0..1 anima escala y aparición. */
-function tarjetaHtml({ titulo, texto, emoji }, bg, progreso, pie) {
+function tarjetaHtml({ titulo, texto, emoji }, bg, progreso) {
   const scale = 0.94 + 0.06 * progreso;
   const op = Math.min(1, 0.35 + progreso * 1.2);
   const dy = (1 - progreso) * 14;
@@ -73,19 +94,16 @@ function tarjetaHtml({ titulo, texto, emoji }, bg, progreso, pie) {
     display:flex;align-items:center;justify-content:center}
   .card{width:86%;text-align:center;color:#fff;
     transform:scale(${scale}) translateY(${dy}px);opacity:${op}}
-  .emoji{font-size:96px;line-height:1.1;margin-bottom:14px}
-  .titulo{font-size:40px;font-weight:800;line-height:1.15;
-    text-shadow:0 3px 10px rgba(0,0,0,.35);margin-bottom:12px}
-  .texto{font-size:25px;font-weight:500;opacity:.93;line-height:1.3}
-  .pie{position:absolute;bottom:18px;width:100%;text-align:center;
-    font-size:16px;opacity:.55;color:#fff;letter-spacing:.5px}
+  .emoji{font-size:120px;line-height:1.1;margin-bottom:18px}
+  .titulo{font-size:46px;font-weight:800;line-height:1.15;
+    text-shadow:0 3px 10px rgba(0,0,0,.35);margin-bottom:14px}
+  .texto{font-size:30px;font-weight:500;opacity:.95;line-height:1.35}
   </style></head><body>
   <div class="card">
     <div class="emoji">${emoji || '💬'}</div>
     <div class="titulo">${esc(titulo || '')}</div>
     <div class="texto">${esc(texto || '')}</div>
   </div>
-  ${pie ? `<div class="pie">${esc(pie)}</div>` : ''}
   </body></html>`;
 }
 
@@ -106,6 +124,14 @@ function gifToMp4(gifPath) {
         '-y',
         '-i',
         gifPath,
+        // Clave para que se respeten las pausas: el GIF tiene tiempos
+        // variables por fotograma y el MP4 necesita cadencia constante.
+        // Sin esto, ffmpeg remuestrea y la pausa larga del remate final
+        // se pierde: el último fotograma "pasa volando".
+        '-fps_mode',
+        'cfr',
+        '-r',
+        '10',
         '-movflags',
         'faststart',
         '-pix_fmt',
@@ -147,23 +173,50 @@ async function crearGif(getBrowser, transcripcion) {
   try {
     await page.setViewport({ width: W, height: H, deviceScaleFactor: 1 });
 
-    // Portada + escenas + cierre con la frase.
+    // Historia: portada breve + 3 actos + remate final.
     const cards = [
-      { titulo: 'Madaleno informa', texto: 'Qué se cuece últimamente', emoji: '📡' },
-      ...escenas,
-      { titulo: 'En resumen', texto: g.frase || '', emoji: '🤷' },
+      {
+        titulo: 'Madaleno',
+        texto: 'Érase una vez este grupo…',
+        emoji: '🎬',
+        ms: 1100,
+      },
+      ...escenas.map((e) => ({
+        titulo: recortar(e.titulo, 18),
+        texto: recortar(e.texto, 30),
+        emoji: e.emoji || '💬',
+        ms: FRAME_MS,
+      })),
+      {
+        titulo: 'Moraleja',
+        texto: recortar(g.frase, 52),
+        emoji: '🎭',
+        // El remate necesita bastante más tiempo: es lo único que hay que
+        // leer entero y, en bucle, lo último antes de volver a empezar.
+        ms: 4200,
+        final: true,
+      },
     ];
 
     for (let i = 0; i < cards.length; i++) {
       const bg = BGS[i % BGS.length];
-      // 2 fotogramas por tarjeta: entrada + reposo (da sensación de animación)
-      for (const progreso of [0.35, 1]) {
-        await page.setContent(
-          tarjetaHtml(cards[i], bg, progreso, `${i + 1}/${cards.length}`),
-          { waitUntil: 'load' }
-        );
-        const buf = await page.screenshot({ type: 'png' });
-        frames.push({ buf, hold: progreso === 1 });
+      const c = cards[i];
+      // Entrada rápida + reposo: da sensación de movimiento.
+      await page.setContent(tarjetaHtml(c, bg, 0.35), { waitUntil: 'load' });
+      frames.push({ buf: await page.screenshot({ type: 'png' }), ms: 160 });
+
+      await page.setContent(tarjetaHtml(c, bg, 1), { waitUntil: 'load' });
+      const reposo = await page.screenshot({ type: 'png' });
+      if (c.final) {
+        // Algunos reproductores recortan o ignoran una pausa larga en el
+        // último fotograma. Repetirlo en varios trozos garantiza que se
+        // vea tanto en el GIF como tras la conversión a MP4.
+        const trozo = Math.round(c.ms / 3);
+        frames.push({ buf: reposo, ms: trozo });
+        frames.push({ buf: reposo, ms: trozo });
+        frames.push({ buf: reposo, ms: trozo });
+      } else {
+        frames.push({ buf: reposo, ms: c.ms });
       }
     }
   } finally {
@@ -177,10 +230,7 @@ async function crearGif(getBrowser, transcripcion) {
     const rgba = new Uint8ClampedArray(png.data);
     const palette = quantize(rgba, 256);
     const index = applyPalette(rgba, palette);
-    enc.writeFrame(index, W, H, {
-      palette,
-      delay: f.hold ? FRAME_MS : 180, // entrada rápida, reposo largo
-    });
+    enc.writeFrame(index, W, H, { palette, delay: f.ms });
   }
   enc.finish();
 

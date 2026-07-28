@@ -106,14 +106,20 @@ async function ingestDocs(_db, docsDir) {
 }
 
 // ---------- Contexto del grupo ----------
+// Los resúmenes, estadísticas y GIF deben reflejar la conversación real
+// del grupo: se excluyen los mensajes dirigidos al bot ("@madaleno ...")
+// y las respuestas del propio bot, que si no se retroalimentan.
+const TRIGGER_LIKE = BOT_TRIGGER.toLowerCase() + '%';
+const SIN_RUIDO = `AND from_me = 0 AND lower(trim(body)) NOT LIKE ?`;
+
 function recentMessages(db, chatId, limit = 50) {
   return db
     .prepare(
       `SELECT author_name, body, ts FROM messages
-       WHERE chat_id = ? AND body != '' AND type = 'chat'
+       WHERE chat_id = ? AND body != '' AND type = 'chat' ${SIN_RUIDO}
        ORDER BY ts DESC LIMIT ?`
     )
-    .all(chatId, limit)
+    .all(chatId, TRIGGER_LIKE, limit)
     .reverse();
 }
 
@@ -122,9 +128,10 @@ function messagesSince(db, chatId, since) {
     .prepare(
       `SELECT author_name, author_id, body, ts FROM messages
        WHERE chat_id = ? AND ts >= ? AND body != '' AND type = 'chat'
+       ${SIN_RUIDO}
        ORDER BY ts ASC`
     )
-    .all(chatId, since);
+    .all(chatId, since, TRIGGER_LIKE);
 }
 
 function transcript(rows) {
@@ -179,6 +186,7 @@ function computeStats(db, chatId) {
          FROM reactions r
          JOIN messages m ON m.id = r.msg_id
         WHERE r.chat_id = ? AND r.ts >= ? AND r.emoji != ''
+          AND m.from_me = 0
         GROUP BY m.author_name ORDER BY n DESC LIMIT 1`
     )
     .get(chatId, since);

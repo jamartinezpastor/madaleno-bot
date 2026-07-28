@@ -45,7 +45,8 @@ db.exec(`
     body         TEXT,
     type         TEXT,
     ts           INTEGER NOT NULL,        -- epoch segundos (hora del mensaje)
-    captured_at  INTEGER NOT NULL         -- epoch ms (cuándo lo guardamos)
+    captured_at  INTEGER NOT NULL,        -- epoch ms (cuándo lo guardamos)
+    from_me      INTEGER NOT NULL DEFAULT 0  -- 1 = lo envió el propio bot
   );
   CREATE INDEX IF NOT EXISTS idx_chat_ts ON messages (chat_id, ts);
 
@@ -67,11 +68,25 @@ const upsertReaction = db.prepare(`
     emoji=@emoji, ts=@ts
 `);
 
+// Migración suave: añade columnas nuevas a bases de datos ya creadas.
+{
+  const cols = db
+    .prepare('PRAGMA table_info(messages)')
+    .all()
+    .map((c) => c.name);
+  if (!cols.includes('from_me')) {
+    db.exec('ALTER TABLE messages ADD COLUMN from_me INTEGER NOT NULL DEFAULT 0');
+    console.log('[db] Migración: columna from_me añadida.');
+  }
+}
+
 const insertStmt = db.prepare(`
   INSERT OR IGNORE INTO messages
-    (id, chat_id, chat_name, author_id, author_name, body, type, ts, captured_at)
+    (id, chat_id, chat_name, author_id, author_name, body, type, ts,
+     captured_at, from_me)
   VALUES
-    (@id, @chat_id, @chat_name, @author_id, @author_name, @body, @type, @ts, @captured_at)
+    (@id, @chat_id, @chat_name, @author_id, @author_name, @body, @type, @ts,
+     @captured_at, @from_me)
 `);
 
 // Esquema de documentos (RAG) del módulo de Q&A.
@@ -177,6 +192,10 @@ client.on('message_create', async (msg) => {
       type: msg.type || 'chat',
       ts: msg.timestamp || Math.floor(Date.now() / 1000),
       captured_at: Date.now(),
+      // Mensajes enviados por la propia cuenta del bot: se guardan (para
+      // tener el historial completo) pero se excluyen de resúmenes,
+      // estadísticas y GIF, porque son ruido generado por él mismo.
+      from_me: msg.fromMe ? 1 : 0,
     });
 
     // Log de descubrimiento: ayuda a encontrar el id del grupo y el tuyo.
