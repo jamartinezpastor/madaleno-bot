@@ -89,6 +89,16 @@ const client = new Client({
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
+      // Reduce el consumo de RAM: importante en un VPS compartido con
+      // otras aplicaciones. Sin esto, Chromium puede ser matado por el
+      // OOM killer y arrastrar al proceso entero.
+      '--no-zygote',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding',
+      '--disable-features=site-per-process,TranslateUI',
+      '--js-flags=--max-old-space-size=256',
     ],
   },
 });
@@ -97,11 +107,15 @@ client.on('qr', (qr) => {
   console.log('\n=== Escanea este QR con el WhatsApp del número secundario ===');
   console.log('(Ajustes → Dispositivos vinculados → Vincular dispositivo)\n');
   qrcode.generate(qr, { small: true });
+  // Copia en disco: útil si los logs son incómodos de leer.
+  // GET http://localhost:3000/qr lo devuelve como texto.
+  try {
+    fs.writeFileSync(path.join(DATA_DIR, 'last-qr.txt'), qr);
+  } catch (_) {}
 });
 
 client.on('authenticated', () => console.log('[wa] Autenticado, sesión guardada.'));
 client.on('auth_failure', (m) => console.error('[wa] Fallo de auth:', m));
-client.on('disconnected', (r) => console.error('[wa] Desconectado:', r));
 
 client.on('ready', () => {
   console.log('[wa] Cliente listo y escuchando.');
@@ -202,7 +216,57 @@ client.on('message_reaction', (reaction) => {
   }
 });
 
-client.initialize();
+// ---------- Arranque robusto ----------
+// client.initialize() devuelve una promesa: si se llama "a pelo" y falla
+// (Chromium matado por falta de memoria, "Target closed", timeout de
+// navegación...), Node mata el proceso por unhandled rejection y el
+// contenedor entra en bucle de reinicio. Aquí se reintenta con espera
+// creciente y el proceso sigue vivo.
+let arrancando = false;
+let intentos = 0;
+
+async function arrancarWhatsApp() {
+  if (arrancando) return;
+  arrancando = true;
+  try {
+    console.log(`[wa] Inicializando cliente (intento ${intentos + 1})...`);
+    await client.initialize();
+    intentos = 0;
+    console.log('[wa] Inicialización completada.');
+  } catch (err) {
+    intentos++;
+    const espera = Math.min(60, 5 * intentos); // 5s, 10s, ... máx 60s
+    console.error(
+      `[wa] Fallo al inicializar (${err.message}). ` +
+        `Reintento en ${espera}s.`
+    );
+    setTimeout(() => {
+      arrancando = false;
+      arrancarWhatsApp();
+    }, espera * 1000);
+    return;
+  }
+  arrancando = false;
+}
+
+arrancarWhatsApp();
+
+// Si WhatsApp desconecta la sesión, reintenta en vez de quedarse muerto.
+client.on('disconnected', (motivo) => {
+  console.error('[wa] Desconectado:', motivo, '- reintentando en 15s');
+  setTimeout(() => {
+    arrancando = false;
+    arrancarWhatsApp();
+  }, 15000);
+});
+
+// Red de seguridad: un error asíncrono suelto no debe tumbar el bot.
+process.on('unhandledRejection', (err) => {
+  console.error('[sys] Promesa rechazada sin gestionar:', err && err.message);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[sys] Excepción no capturada:', err && err.stack);
+});
 
 // ---- Ingesta de documentos: al estar listo y luego cada 10 min ----
 client.on('ready', () => {
@@ -237,6 +301,17 @@ client.on('ready', () => {
 // ---------- API HTTP ----------
 const app = express();
 app.use(express.json({ limit: '1mb' }));
+
+// Último QR emitido (texto plano). Útil si los logs son incómodos.
+app.get('/qr', (_req, res) => {
+  try {
+    res.type('text/plain').send(
+      fs.readFileSync(path.join(DATA_DIR, 'last-qr.txt'), 'utf8')
+    );
+  } catch (e) {
+    res.status(404).send('No hay QR pendiente (¿ya está vinculado?)');
+  }
+});
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true, state: client.info ? 'ready' : 'starting' });
