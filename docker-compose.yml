@@ -1,0 +1,24 @@
+services:
+  capture:
+    build: ./capture
+    container_name: madaleno-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATA_DIR=/data
+      - CAPTURE_PORT=3000
+    volumes:
+      # Sesión de WhatsApp + base de datos (persistente)
+      - ./data:/data
+      # --- CSV como montajes de FICHERO ---
+      # Declararlos por separado hace que Coolify los muestre en
+      # Storages > File mount, donde puedes editar su contenido desde
+      # la web y guardar, sin entrar por SSH.
+      - ./data/docs/conocimiento.csv:/data/docs/conocimiento.csv
+      - ./data/docs/cumples.csv:/data/docs/cumples.csv
+      - ./data/docs/efemerides.csv:/data/docs/efemerides.csv
+    ports:
+      # Solo accesible desde el propio servidor (no expuesto a Internet).
+      - "127.0.0.1:3000:3000"
+    # Chromium (Puppeteer) necesita memoria compartida
+    shm_size: "1gb"

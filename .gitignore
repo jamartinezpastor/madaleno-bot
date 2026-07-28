@@ -1,0 +1,26 @@
+.env
+*.key
+
+data/wweb-session/
+.wwebjs_auth/
+.wwebjs_cache/
+
+# ---- Datos del grupo (mensajes, reacciones) y datos personales ----
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/docs/*
+!data/docs/.gitkeep
+!data/docs/*.example
+
+# ---- Node ----
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# ---- Sistema ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
