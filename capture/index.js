@@ -20,6 +20,7 @@ const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qa = require('./qa');
 const avisos = require('./avisos');
 const groups = require('./groups');
+const personal = require('./personal');
 
 // ---------- Configuración ----------
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
@@ -93,6 +94,7 @@ const insertStmt = db.prepare(`
 // Esquema de documentos (RAG) del módulo de Q&A.
 qa.initSchema(db);
 avisos.initSchema(db);
+personal.initSchema(db);
 
 // ---------- Cliente WhatsApp ----------
 const client = new Client({
@@ -261,6 +263,40 @@ async function datosOrla(chatId, sobrescrituras = {}) {
   };
 }
 
+// ---- Grupos vigilados en los que participa una persona ----
+// Necesario para el chat privado: el bot solo atiende a miembros de sus
+// grupos, y solo les cuenta lo que ya pueden leer.
+let cacheChats = { lista: null, ts: 0 };
+const CHATS_TTL_MS = 5 * 60 * 1000;
+
+async function gruposVigilados() {
+  if (cacheChats.lista && Date.now() - cacheChats.ts < CHATS_TTL_MS) {
+    return cacheChats.lista;
+  }
+  const todos = await client.getChats();
+  const lista = todos
+    .filter((c) => c.isGroup)
+    .filter((c) => GROUP_IDS.length === 0 || GROUP_IDS.includes(c.id._serialized));
+  cacheChats = { lista, ts: Date.now() };
+  return lista;
+}
+
+async function gruposDelUsuario(userId) {
+  const digitos = String(userId).split('@')[0].replace(/\D/g, '');
+  const salida = [];
+  for (const chat of await gruposVigilados()) {
+    const dentro = (chat.participants || []).some(
+      (p) =>
+        p.id &&
+        String(p.id._serialized).split('@')[0].replace(/\D/g, '') === digitos
+    );
+    if (dentro) {
+      salida.push({ id: chat.id._serialized, nombre: chat.name || 'Grupo' });
+    }
+  }
+  return salida;
+}
+
 const nombresChat = new Map();
 
 // ---- Administradores reales del grupo ----
@@ -322,6 +358,33 @@ async function nombreDelChat(msg, chatId) {
   return nombre;
 }
 
+async function atenderPrivado(msg) {
+  try {
+    if (msg.fromMe) return; // lo que envía el propio bot
+    const from = msg.from || '';
+    if (!from.endsWith('@c.us') && !from.endsWith('@lid')) return;
+
+    let nombre = null;
+    try {
+      const c = await msg.getContact();
+      nombre = c.name || c.pushname || null;
+    } catch (_) {}
+
+    const respuesta = await personal.handlePrivate(db, {
+      body: msg.body || '',
+      userId: from,
+      nombre,
+      botNumber:
+        (client.info && client.info.wid && client.info.wid.user) || null,
+      getGruposDelUsuario: () => gruposDelUsuario(from),
+    });
+
+    if (respuesta) await client.sendMessage(from, respuesta);
+  } catch (err) {
+    console.error('[privado] Error:', err.stack || err);
+  }
+}
+
 // 'message_create' se dispara con cualquier mensaje del chat
 // (entrantes y propios), sin necesidad de que tú lo abras/leas.
 client.on('message_create', async (msg) => {
@@ -332,7 +395,11 @@ client.on('message_create', async (msg) => {
   try {
     chatId = [msg.from, msg.to].find((id) => id && id.endsWith('@g.us')) || null;
   } catch (_) {}
-  if (!chatId) return; // no es un grupo
+  if (!chatId) {
+    // ---- Chat privado ----
+    await atenderPrivado(msg);
+    return;
+  }
 
   if (GROUP_IDS.length > 0 && !GROUP_IDS.includes(chatId)) return;
 

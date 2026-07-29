@@ -51,6 +51,7 @@ vincula como un dispositivo más.
 │  avisos.js     cumpleaños y eventos          │
 │  ephemeris.js  efemérides                    │
 │  orla.js       orla del grupo (imagen)       │
+│  personal.js   resumen personal por privado  │
 │  gemini.js     cliente de la API de Gemini   │
 │  csv.js        parser CSV compartido         │
 └──────────────────────────────────────────────┘
@@ -226,6 +227,36 @@ ignora **en silencio** (no revela que existe).
 
 **Reacciones:** se cuentan desde que despliegas esta versión (antes no se
 guardaban; no son retroactivas).
+
+## Resumen personal (chat privado)
+
+Cualquier miembro de un grupo vigilado puede escribir al bot **por privado**
+y pedir su resumen personal: solo lo que le afecta a él (menciones,
+peticiones, plazos) más dos líneas de contexto.
+
+```
+@madaleno miresumen           las últimas 24 h
+@madaleno miresumen semana    los últimos 7 días
+@madaleno miresumen 2         elige el grupo por número
+@madaleno miresumen padel     ...o por parte del nombre
+@madaleno miresumen todos     todos tus grupos
+```
+
+Si solo compartís un grupo, no pregunta nada. Si compartís varios, muestra
+la lista numerada y basta con responder `2` o `padel` a secas: recuerda
+qué lista te enseñó durante 20 minutos.
+
+**Primer contacto:** escriba lo que escriba, el bot se presenta con la
+lista de comandos. Cada opción incluye un enlace `wa.me` que al pulsarlo
+abre el chat con el comando ya escrito (WhatsApp no permite botones
+interactivos a las cuentas normales; esto es lo más parecido).
+
+**Seguridad:** el bot solo responde a quien sea miembro de alguno de sus
+grupos —a los desconocidos no les contesta nada— y solo cuenta lo que esa
+persona ya puede leer en su grupo. No hace falta ser administrador: eso es
+solo para los comandos que escriben *en* el grupo. Y el bot **nunca**
+inicia una conversación privada: contesta, no escribe primero (abrir chats
+con quien no te ha escrito es justo lo que WhatsApp considera spam).
 
 ## Cumpleaños y eventos
 
