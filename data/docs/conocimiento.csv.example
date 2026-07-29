@@ -1,6 +1,0 @@
-# Datos que el bot usa para responder preguntas. Columnas libres:
-# puedes usar pregunta,respuesta o tema,dato... lo que te venga bien.
-tema,dato
-horario oficina,De 9:00 a 17:00. Los viernes hasta las 14:00.
-wifi invitados,Red "InvitadosXY". Contraseña "hola1234"
-cuota anual,50 € que se pagan en enero

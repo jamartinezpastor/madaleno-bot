@@ -1,6 +1,8 @@
+# ---- SECRETOS: nunca subir ----
 .env
 *.key
 
+# ---- Sesión de WhatsApp: quien la tenga puede suplantar tu cuenta ----
 data/wweb-session/
 .wwebjs_auth/
 .wwebjs_cache/
@@ -18,7 +20,7 @@ node_modules/
 npm-debug.log*
 package-lock.json
 
-# ---- Sistema ----
+# ---- Sistema / editor ----
 .DS_Store
 Thumbs.db
 .vscode/

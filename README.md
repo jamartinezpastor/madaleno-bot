@@ -1,22 +1,27 @@
 # Madaleno Bot
 
-Bot de WhatsApp para grupos: resúmenes en texto y .GIF bajo demanda, estadísticas, efemérides y recordatorio de eventos. Self-hosted en un contenedor y con los datos persistidos en CSV.
+> Bot de WhatsApp para grupos: resúmenes bajo demanda, estadísticas, GIFs con
+> humor, efemérides y felicitaciones de cumpleaños. Self-hosted, un solo
+> contenedor, todos los datos en CSV.
 
 Se conecta a WhatsApp Web con una **SIM secundaria** (vinculada como
 dispositivo), captura todos los mensajes y reacciones del grupo en tiempo real
 y responde a comandos:
 
-| Comando                | Qué hace                                            |
-| ---------------------- | --------------------------------------------------- |
-| `@madaleno resumen`    | Resumen de las últimas 24h en 1-2 líneas            |
-| `@madaleno info`       | Estadísticas del grupo (semana actual + pasada)     |
-| `@madaleno gif`        | GIF animado con humor sobre lo que se habla + frase |
-| `@madaleno efemérides` | Qué pasó un día como hoy (desde CSV)                |
-| `@madaleno <pregunta>` | Responde con tus datos CSV + el historial           |
-| —                      | Recordatorio de eventos/Cumpleaños (desde CSV)      |
+| Comando | Qué hace |
+|---|---|
+| `@madaleno resumen` | Resumen de las últimas 24h en 1-2 líneas |
+| `@madaleno info` | Estadísticas del grupo (semana actual + pasada) |
+| `@madaleno gif` | GIF animado con humor sobre lo que se habla + frase |
+| `@madaleno orla` | Orla conmemorativa con las fotos del grupo |
+| `@madaleno efemérides` | Qué pasó un día como hoy (desde CSV) |
+| `@madaleno busca <palabras>` | Encuentra mensajes antiguos del grupo |
+| `@madaleno ayuda` | Lista breve de comandos |
+| `@madaleno <pregunta>` | Responde con tus datos CSV + el historial |
+| — | Felicita cumpleaños cada día a las 11:30 desde un CSV |
 
-La API que se utiliza para IA es **Google Gemini**. Todos los datos viven en **CSV** dentro de
-`data/docs/`, para poder editarlos desde cualquier editor de texto facilmente.
+La IA es **Google Gemini**. Todos los datos viven en **CSV** dentro de
+`data/docs/`, para poder editarlos desde la interfaz de Coolify sin SSH.
 
 ## ⚠️ Lee esto antes de nada
 
@@ -42,24 +47,28 @@ vincula como un dispositivo más.
 │                (mensajes y reacciones)       │
 │  qa.js         comandos del grupo            │
 │  gifmaker.js   GIF (Chromium + gifenc)       │
-│  ephemeris.js  efemérides desde CSV          │
-│  birthdays.js  felicitaciones desde CSV      │
+│  groups.js     datos y admins por grupo      │
+│  avisos.js     cumpleaños y eventos          │
+│  ephemeris.js  efemérides                    │
+│  orla.js       orla del grupo (imagen)       │
 │  gemini.js     cliente de la API de Gemini   │
 │  csv.js        parser CSV compartido         │
 └──────────────────────────────────────────────┘
          │                        │
     data/messages.db        data/docs/*.csv
-    (mensajes, reacciones)  (tus datos, editables)
+    (mensajes, reacciones)  (un CSV por grupo + comunes)
 ```
 
 El GIF se renderiza reutilizando el **Chromium que ya está abierto** para
-WhatsApp Web. Los fotogramas se codifican con `gifenc` (JS puro, sin compilación
-nativa), se convierten a MP4 con ffmpeg y después se envian como GIF para que se reproduzcan en bucle.
+WhatsApp Web: no se lanza un segundo navegador, algo importante en un VPS
+modesto. Los fotogramas se codifican con `gifenc` (JS puro, sin compilación
+nativa) y se convierten a MP4 con ffmpeg, porque WhatsApp reproduce en bucle
+los MP4 enviados como GIF mientras que un `.gif` suele quedarse estático.
 
 ## Requisitos
 
-- Docker + Docker Compose.
-- RAM: un contenedor con Node + Chromium. ~1 GB basta.
+- Docker + Docker Compose (o Coolify).
+- RAM modesta: un solo contenedor con Node + Chromium. ~1 GB basta.
 - Salida HTTPS hacia `generativelanguage.googleapis.com`.
 
 ## Puesta en marcha
@@ -70,10 +79,8 @@ cd madaleno-bot
 ```
 
 1. Crea una API key en https://aistudio.google.com/apikey
-
 2. `cp .env.example .env` y pega tu `GEMINI_API_KEY`.
    (`.env` está en `.gitignore`: nunca se sube al repo.)
-
 3. Crea tus CSV a partir de las plantillas:
 
    ```bash
@@ -85,10 +92,10 @@ cd madaleno-bot
    ```
 
    Los tres ficheros deben existir antes de levantar el contenedor: Docker
-   crearía un _directorio_ en su lugar si no existen.
+   crearía un *directorio* en su lugar si no existen.
 
 4. Levanta y escanea el QR con el WhatsApp de tu **SIM secundaria**
-   (_Ajustes → Dispositivos vinculados → Vincular dispositivo_):
+   (*Ajustes → Dispositivos vinculados → Vincular dispositivo*):
 
    ```bash
    docker compose up -d
@@ -108,41 +115,68 @@ cd madaleno-bot
 > El puerto 3000 se publica solo en `127.0.0.1`. Para verlo desde fuera, túnel
 > SSH.
 
-## Ficheros CSV con la persistencia
+## Varios grupos
 
-Todo el contenido del bot son CSV en `data/docs/`:
+El bot puede estar en tantos grupos como quieras. Cada grupo responde con
+**sus propios datos**: sus cumpleaños, sus eventos, sus efemérides, sus
+datos y sus admins.
 
-| Fichero            | Para qué            | Columnas                                      |
-| ------------------ | ------------------- | --------------------------------------------- |
-| `cumples.csv`      | Cumpleaños          | `nombre,dia,mes` (o `nombre,fecha`)           |
-| `efemerides.csv`   | Efemérides          | `dia,mes,anio,acontecimiento`                 |
-| `conocimiento.csv` | Responder preguntas | libres (`tema,dato`, `pregunta,respuesta`...) |
+**Para añadir un grupo nuevo basta con crear un CSV.** No hay que tocar
+variables de entorno ni redesplegar.
 
-Cualquier **otro** `.csv` que dejes en `data/docs/` se suma automáticamente al
-conocimiento para las preguntas. El parser admite comillas (`"texto, con
-comas"`), separador `,` o `;` (Excel español), cabecera opcional y líneas de
-comentario que empiecen por `#`.
+### Un CSV por grupo
 
-Los CSV se releen solos cuando cambian: **no hace falta reiniciar** tras
-editarlos (los cumpleaños y efemérides se leen en cada consulta; el
-conocimiento detecta el cambio por fecha de modificación).
+**Duplica la plantilla y renómbrala con el id del grupo.** Nada más:
 
-### Editarlos con un PaaS (Coolify)
+```
+data/docs/120363011112222.csv
+```
 
-En `docker-compose.yml` los tres CSV están declarados como _montajes de
-fichero_ individuales. Por ejemplo, Coolify los muestra en:
+El id aparece en los logs en cuanto alguien escribe en el grupo:
 
-**Tu recurso → Storages → (el montaje del CSV) → editar contenido → Save**
+```
+[grupo] "Padel de los martes" id=120363011112222@g.us · autor=34699...@c.us
+```
 
-Así puedes añadir o quitar cumpleaños, efemérides o datos desde el navegador,
-sin entrar por SSH. Notas prácticas:
+Dentro, una columna `tipo` para cada cosa:
 
-- Coolify aplica los cambios de storages al **redesplegar/reiniciar** el
-  recurso; el bot releerá el CSV en la siguiente consulta.
-- Si Coolify muestra un montaje como _directorio_ en vez de fichero, usa el
-  botón **Convert to File** (ocurre cuando el fichero no existía al desplegar).
-- Alternativa siempre válida: editar los ficheros en el host, en la ruta del
-  proyecto.
+```csv
+tipo,dia,mes,anio,texto
+cumple,16,5,,María García
+evento,1,9,,Vuelta al cole        <- sin año = todos los años
+evento,3,10,2026,Cena de empresa  <- con año = solo ese día
+efemeride,16,5,2019,Nace este grupo
+dato,,,,Horario de oficina: de 9 a 17h
+```
+
+Tipos: `cumple`, `evento` (o `recordatorio`), `efemeride` y `dato`.
+
+El nombre del fichero es la **única** forma de asociarlo a un grupo. Como
+el id no cambia nunca, da igual que renombren el chat.
+
+### Ficheros comunes
+
+Cualquier CSV cuyo nombre **no** sea un id de grupo se aplica a **todos**
+los grupos. Sirve para lo que no cambia de un grupo a otro
+(efemérides históricas, datos generales) y evita duplicarlo en cada
+fichero.
+
+### Admins: nada que configurar
+
+El bot obedece a **los administradores del grupo en WhatsApp**, y a nadie
+más. No hay listas de números en ningún fichero ni variable: al añadir el
+bot a un grupo nuevo, quien administre ese grupo manda sobre el bot.
+
+La lista se consulta a WhatsApp, se cachea 10 minutos y se refresca sola
+cuando cambian los administradores. Si WhatsApp falla al devolverla, se
+sigue usando la última conocida.
+
+### Formato antiguo
+
+Los CSV de la versión anterior (`cumples.csv` con `nombre,dia,mes`,
+`efemerides.csv`, y cualquier otro como datos) se siguen leyendo y se
+tratan como **comunes a todos los grupos**. Puedes migrarlos cuando
+quieras moviendo sus filas a un fichero de grupo con la columna `tipo`.
 
 ## Comandos
 
@@ -162,42 +196,99 @@ ignora **en silencio** (no revela que existe).
   en día y mes, ordenados por año. Es determinista y gratis. Si el día no
   tiene nada y activas `EPHEMERIS_FALLBACK_AI=true`, lo pregunta a Gemini
   (avisando de que puede equivocarse).
+- **`orla`** — compone una orla de graduación con el nombre del grupo y
+  las fotos y nombres de sus miembros. No usa IA. Las fotos dependen de la
+  privacidad de cada uno: quien no la tenga accesible sale con un avatar
+  de iniciales. Si alguien aparece con su número (porque nunca ha escrito),
+  El nombre que se muestra es, por orden: el que tengas guardado en la
+  agenda del teléfono del bot, el que la persona use en WhatsApp, el que
+  fijes con una fila `nombre,,,,34699111222 | María`, y por último su
+  número.
+  En grupos de más de `ORLA_MAX_MIEMBROS` (60) salen los más activos.
+- **`busca <palabras>`** — busca en **todo** el historial guardado del
+  grupo, con filtros que WhatsApp no tiene:
+
+  ```
+  @madaleno busca proveedor de:Ana
+  @madaleno busca enlaces mes:junio
+  @madaleno busca excel año:2025
+  ```
+
+  Insensible a mayúsculas y tildes ("cumpleaños" encuentra "cumpleanos"),
+  ordena por relevancia cuando hay varios términos y muestra los enlaces
+  completos. Si no hay coincidencias literales, pregunta a la IA por otras
+  formas de decirlo y reintenta (así "hoja de cálculo" encuentra "os paso
+  el excel"). Busca en el historial del bot, no en el móvil de cada uno:
+  funciona aunque te unieras después o hayas cambiado de teléfono.
+- **`ayuda`** — recuerda los comandos en dos líneas.
 - **`<pregunta libre>`** — responde priorizando tus CSV, luego el historial
   del grupo, y solo al final conocimiento general (diciéndolo).
 
-## Cumpleaños
+**Reacciones:** se cuentan desde que despliegas esta versión (antes no se
+guardaban; no son retroactivas).
 
-Con la configuración por defecto (`BIRTHDAY_CHECK_GREET=siempre`,
-`BIRTHDAY_STYLE=generico`) el bot felicita cada día a las 11:30 con
-`🎉 ¡Feliz cumpleaños, <nombre>! 🎉`, **sin consumir IA**. Solo felicita una
-vez por persona y año. Requiere `GROUP_IDS` definido.
+## Cumpleaños y eventos
+
+Cada día, a partir de `BIRTHDAY_HOUR` (11:30), el bot revisa los `cumple` y
+`evento` del CSV de cada grupo y avisa en el grupo correspondiente. Con la
+configuración por defecto (`BIRTHDAY_CHECK_GREET=siempre`,
+`BIRTHDAY_STYLE=generico`) **no consume IA**: felicita con
+`🎉 ¡Feliz cumpleaños, <nombre>! 🎉` y recuerda eventos con
+`📅 *Hoy:* <texto>`. Cada aviso se manda una sola vez por grupo y día.
 
 Opcional: `BIRTHDAY_CHECK_GREET=ia` comprueba antes si alguien ya felicitó
-(consume Gemini, no es infalible) y `BIRTHDAY_STYLE=ia` escribe un texto
-variado cada vez.
+(consume IA, no es infalible) y `BIRTHDAY_STYLE=ia` escribe felicitaciones
+variadas.
+
+### Editar los CSV desde Coolify
+
+Los CSV están declarados como *file mounts*: en **Storages** puedes editar
+su contenido desde el navegador y guardar, sin entrar por SSH. Al añadir un
+grupo nuevo, crea allí el fichero (o súbelo al servidor) y el bot lo
+detecta solo: los CSV se releen cuando cambian.
 
 ## Configuración (.env)
 
-| Variable                                  | Qué hace                                          |
-| ----------------------------------------- | ------------------------------------------------- |
-| `GEMINI_API_KEY`                          | API key de Google AI Studio                       |
-| `GEMINI_MODEL`                            | Modelo (def. `gemini-3.6-flash`)                  |
-| `BOT_TRIGGER`                             | Disparador (def. `@madaleno`)                     |
-| `ADMIN_IDS`                               | Quién puede usar comandos (`num@c.us`, coma-sep.) |
-| `QA_RATE_PER_HOUR`                        | Límite de comandos por admin y hora               |
-| `GIF_RATE_PER_HOUR`                       | Límite de GIFs por admin y hora                   |
-| `BIRTHDAY_CSV` / `EPHEMERIS_CSV`          | Nombres de esos CSV                               |
-| `BIRTHDAY_HOUR`                           | Hora de felicitar (def. 11:30)                    |
-| `BIRTHDAY_CHECK_GREET`                    | `siempre` / `ia` / `nombre`                       |
-| `BIRTHDAY_STYLE`                          | `generico` / `ia`                                 |
-| `EPHEMERIS_FALLBACK_AI`                   | `true` para tirar de IA si el CSV no tiene nada   |
-| `GIF_WIDTH`, `GIF_HEIGHT`, `GIF_FRAME_MS` | Aspecto del GIF                                   |
-| `GROUP_IDS`                               | IDs de grupos a vigilar                           |
-| `TIMEZONE`                                | Zona horaria (def. `Europe/Madrid`)               |
+| Variable | Qué hace |
+|---|---|
+| `GEMINI_API_KEY` | API key de Google AI Studio |
+| `GEMINI_MODEL` | Modelo (def. `gemini-3.6-flash`) |
+| `BOT_TRIGGER` | Disparador (def. `@madaleno`) |
+| `ADMIN_IDS` | Quién puede usar comandos (`num@c.us`, coma-sep.) |
+| `QA_RATE_PER_HOUR` | Límite de comandos por admin y hora |
+| `GIF_RATE_PER_HOUR` | Límite de GIFs por admin y hora |
+| `BIRTHDAY_CSV` / `EPHEMERIS_CSV` | Nombres de esos CSV |
+| `BIRTHDAY_HOUR` | Hora de felicitar (def. 11:30) |
+| `BIRTHDAY_CHECK_GREET` | `siempre` / `ia` / `nombre` |
+| `BIRTHDAY_STYLE` | `generico` / `ia` |
+| `EPHEMERIS_FALLBACK_AI` | `true` para tirar de IA si el CSV no tiene nada |
+| `GIF_WIDTH`, `GIF_HEIGHT`, `GIF_FRAME_MS` | Aspecto del GIF |
+| `GROUP_IDS` | IDs de grupos a vigilar |
+| `TIMEZONE` | Zona horaria (def. `Europe/Madrid`) |
 
 El catálogo de modelos de Gemini cambia con frecuencia: si ves un error 404 al
 llamar a la API, comprueba el modelo vigente en
 https://ai.google.dev/gemini-api/docs/models y actualiza `GEMINI_MODEL`.
+
+## Dónde se guardan los mensajes
+
+Todo va a un SQLite dentro del volumen persistente:
+
+```
+/data/messages.db          (en el contenedor)
+```
+
+Tres tablas: `messages` (id, chat, autor, texto, fecha, from_me),
+`reactions` y `avisos_enviados`. No está cifrado: quien tenga acceso al
+servidor puede leer el historial completo de los grupos. Es el mismo
+volumen donde vive la sesión de WhatsApp, así que trátalo como material
+sensible y no lo copies fuera sin pensarlo.
+
+Para curiosear:
+
+```bash
+docker exec -it madaleno-bot node -e "const d=require('better-sqlite3')('/data/messages.db');console.log(d.prepare('SELECT COUNT(*) n FROM messages').get())"
+```
 
 ## Coste y seguridad
 

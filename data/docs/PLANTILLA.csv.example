@@ -1,0 +1,26 @@
+# ── PLANTILLA ──────────────────────────────────────────────────────────
+# Duplica este fichero y renómbralo con el ID del grupo:
+#     120363011112222.csv
+# El id sale en los logs cuando alguien escribe en el grupo:
+#     [grupo] "Padel" id=120363011112222@g.us · autor=34699111222@c.us
+#
+# Si el fichero NO se llama como un id de grupo, sus datos valen para
+# todos los grupos (por ejemplo: generico.csv).
+#
+# No hay que configurar admins: el bot obedece a los administradores
+# del grupo en WhatsApp.
+#
+# Columnas: tipo,dia,mes,anio,texto
+# Tipos: cumple, evento, efemeride, dato, nombre
+# ───────────────────────────────────────────────────────────────────────
+tipo,dia,mes,anio,texto
+cumple,16,5,,María García
+cumple,3,11,,Pedro
+evento,1,9,,Vuelta al cole
+evento,3,10,2026,Cena de empresa
+efemeride,16,5,2019,Nace este grupo
+dato,,,,Horario de oficina: de 9 a 17h
+dato,,,,Wifi invitados: red "InvitadosXY", clave "hola1234"
+# Nombre a mostrar en la orla de quien no ha escrito nunca (o sale con el
+# número). Formato: telefono | nombre
+nombre,,,,34699111222 | María García

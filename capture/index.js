@@ -18,7 +18,8 @@ const Database = require('better-sqlite3');
 const qrcode = require('qrcode-terminal');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qa = require('./qa');
-const birthdays = require('./birthdays');
+const avisos = require('./avisos');
+const groups = require('./groups');
 
 // ---------- Configuración ----------
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
@@ -91,7 +92,7 @@ const insertStmt = db.prepare(`
 
 // Esquema de documentos (RAG) del módulo de Q&A.
 qa.initSchema(db);
-birthdays.initSchema(db);
+avisos.initSchema(db);
 
 // ---------- Cliente WhatsApp ----------
 const client = new Client({
@@ -145,7 +146,168 @@ client.on('ready', () => {
 // Caché de nombres de grupo: getChat() es una llamada al WhatsApp Web
 // interno y puede fallar (errores minificados tipo "r"). Solo se intenta
 // una vez por chat y su fallo nunca bloquea la captura del mensaje.
+// ---- Datos para la orla ----
+// Reúne miembros del grupo con su nombre y su foto de perfil. Las fotos
+// dependen de la privacidad de cada usuario: si no hay, el módulo de la
+// orla dibuja un avatar con las iniciales.
+const MAX_ORLA = parseInt(process.env.ORLA_MAX_MIEMBROS || '60', 10);
+
+function nombreDesdeBD(authorId) {
+  try {
+    const row = db
+      .prepare(
+        `SELECT author_name FROM messages
+          WHERE author_id = ? AND author_name IS NOT NULL AND author_name != ''
+          ORDER BY ts DESC LIMIT 1`
+      )
+      .get(authorId);
+    return row ? row.author_name : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function mensajesPorAutor(chatId) {
+  const cuenta = new Map();
+  try {
+    const filas = db
+      .prepare(
+        `SELECT author_id, COUNT(*) AS n FROM messages
+          WHERE chat_id = ? AND from_me = 0 GROUP BY author_id`
+      )
+      .all(chatId);
+    for (const f of filas) cuenta.set(f.author_id, f.n);
+  } catch (_) {}
+  return cuenta;
+}
+
+async function datosOrla(chatId, sobrescrituras = {}) {
+  const chat = await client.getChatById(chatId);
+  if (!chat || !chat.isGroup) throw new Error('Esto no es un grupo');
+
+  const yo = client.info && client.info.wid && client.info.wid._serialized;
+  let participantes = (chat.participants || []).filter(
+    (p) => p.id && p.id._serialized !== yo // el bot no sale en su propia orla
+  );
+
+  // En grupos muy grandes, los más participativos.
+  let recortado = false;
+  if (participantes.length > MAX_ORLA) {
+    const cuenta = mensajesPorAutor(chatId);
+    participantes = participantes
+      .sort(
+        (a, b) =>
+          (cuenta.get(b.id._serialized) || 0) - (cuenta.get(a.id._serialized) || 0)
+      )
+      .slice(0, MAX_ORLA);
+    recortado = true;
+  }
+
+  const miembros = [];
+  for (const p of participantes) {
+    const id = p.id._serialized;
+    const digitos = id.split('@')[0];
+
+    // Nombre, por orden de preferencia:
+    //  1) el que TÚ tienes guardado en la agenda del teléfono del bot
+    //  2) el que la persona se ha puesto en WhatsApp (pushname)
+    //  3) el que hayas fijado a mano en el CSV
+    //  4) el que usó al escribir en el grupo
+    //  5) su número
+    let nombre = null;
+    try {
+      const c = await client.getContactById(id);
+      // c.name = agenda del bot · c.pushname = el que usa la persona
+      nombre = c.name || c.shortName || c.pushname || null;
+    } catch (_) {}
+    if (!nombre) nombre = sobrescrituras[digitos] || nombreDesdeBD(id);
+    if (!nombre) nombre = `+${digitos}`;
+
+    let foto = null;
+    try {
+      foto = await client.getProfilePicUrl(id);
+    } catch (_) {
+      foto = null; // privacidad: sin foto accesible
+    }
+
+    miembros.push({ id, nombre, foto });
+  }
+
+  let fotoGrupo = null;
+  try {
+    fotoGrupo = await client.getProfilePicUrl(chatId);
+  } catch (_) {}
+
+  const conFoto = miembros.filter((m) => m.foto).length;
+  console.log(
+    `[orla] ${miembros.length} miembros, ${conFoto} con foto` +
+      (recortado ? ` (recortado a los ${MAX_ORLA} más activos)` : '')
+  );
+
+  const hoy = new Date().toLocaleDateString('es-ES', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  });
+
+  return {
+    titulo: chat.name || 'Nuestro grupo',
+    subtitulo: recortado
+      ? `Los ${miembros.length} miembros más activos`
+      : `${miembros.length} miembros`,
+    pie: `${hoy}${recortado ? '' : ''}`,
+    fotoGrupo,
+    miembros,
+  };
+}
+
 const nombresChat = new Map();
+
+// ---- Administradores reales del grupo ----
+// WhatsApp ya sabe quién administra cada grupo: se le pregunta a él en
+// vez de mantener listas a mano. Se cachea porque consultar el chat es
+// una llamada al WhatsApp Web interno (lenta y a veces caprichosa) y no
+// conviene hacerla en cada mensaje.
+const cacheAdmins = new Map(); // chatId -> { ids: [], ts }
+const ADMIN_TTL_MS = 10 * 60 * 1000;
+
+async function adminsDelGrupo(chatId) {
+  const cached = cacheAdmins.get(chatId);
+  if (cached && Date.now() - cached.ts < ADMIN_TTL_MS) return cached.ids;
+
+  try {
+    const chat = await client.getChatById(chatId);
+    if (!chat || !chat.isGroup || !Array.isArray(chat.participants)) return null;
+
+    const ids = chat.participants
+      .filter((p) => p.isAdmin || p.isSuperAdmin)
+      .map((p) => (p.id && p.id._serialized) || null)
+      .filter(Boolean);
+
+    cacheAdmins.set(chatId, { ids, ts: Date.now() });
+    console.log(`[admins] ${chatId}: ${ids.length} administrador(es)`);
+    return ids;
+  } catch (e) {
+    console.error(`[admins] No pude leer los admins de ${chatId}:`, e.message);
+    // Si ya se leyeron antes, se sigue usando esa lista aunque haya
+    // caducado: es mejor que quedarse sin obedecer a nadie por un fallo
+    // puntual de WhatsApp Web.
+    return cached ? cached.ids : null;
+  }
+}
+
+// Si cambian los administradores del grupo, se invalida su caché.
+client.on('group_admin_changed', (notification) => {
+  try {
+    const gid =
+      (notification && notification.chatId) ||
+      (notification && notification.id && notification.id.remote);
+    if (gid) {
+      cacheAdmins.delete(gid);
+      console.log(`[admins] Cambio de administradores en ${gid}`);
+    }
+  } catch (_) {}
+});
 
 async function nombreDelChat(msg, chatId) {
   if (nombresChat.has(chatId)) return nombresChat.get(chatId);
@@ -216,6 +378,10 @@ client.on('message_create', async (msg) => {
       authorId,
       chatId,
       docsDir: DOCS_DIR,
+      // Admins reales del grupo (según WhatsApp). Null si no se pudo leer.
+      getGroupAdmins: () => adminsDelGrupo(chatId),
+      // Datos para la orla (participantes, nombres y fotos).
+      getDatosOrla: (sobrescrituras) => datosOrla(chatId, sobrescrituras),
       // El GIF se renderiza con el Chromium que ya usa WhatsApp Web.
       getBrowser: () => client.pupBrowser,
     });
@@ -375,23 +541,46 @@ client.on('ready', () => {
     );
   }, 10 * 60 * 1000);
 
-  // ---- Cumpleaños: revisa cada 15 min (el módulo solo actúa pasada
-  //      la hora configurada, p.ej. 11:30, y solo una vez por persona/año).
-  const runBirthdayCheck = async () => {
-    if (GROUP_IDS.length === 0) return; // necesita saber a qué grupo escribir
-    for (const gid of GROUP_IDS) {
-      try {
-        const msgs = await birthdays.checkBirthdays(db, gid, DOCS_DIR);
-        for (const text of msgs) {
-          await client.sendMessage(gid, text);
+  // ---- Avisos diarios (cumpleaños y eventos) ----
+  // Se revisan cada 15 min; el módulo solo actúa pasada la hora
+  // configurada (p.ej. 11:30) y una sola vez por grupo, aviso y día.
+  //
+  // A qué grupos se escribe: a los que tengan CSV propio. Si ningún CSV
+  // declara grupo, se cae a GROUP_IDS (comportamiento clásico de un solo
+  // grupo). Nunca se avisa "a todos los grupos que haya" por si acaso:
+  // sería spam en chats donde no toca.
+  const resolverGrupos = () => {
+    const declarados = groups.gruposConFichero(DOCS_DIR);
+    const ids = declarados.length
+      ? declarados.map((g) => ({ id: g.grupoId, fichero: g.fichero }))
+      : GROUP_IDS.map((id) => ({ id, fichero: '(GROUP_IDS)' }));
+    // Si GROUP_IDS está definido, actúa como lista blanca.
+    return GROUP_IDS.length > 0
+      ? ids.filter((x) => GROUP_IDS.includes(x.id))
+      : ids;
+  };
+
+  const runAvisos = async () => {
+    try {
+      const destinos = resolverGrupos();
+      for (const d of destinos) {
+        try {
+          const cfg = groups.paraChat(DOCS_DIR, d.id);
+          const msgs = await avisos.pendientes(db, d.id, cfg);
+          for (const text of msgs) {
+            await client.sendMessage(d.id, text);
+          }
+        } catch (e) {
+          console.error(`[avisos] Error en ${d.id}:`, e.message);
         }
-      } catch (e) {
-        console.error('[bday] Error en chequeo:', e.message);
       }
+    } catch (e) {
+      console.error('[avisos] Error general:', e.message);
     }
   };
-  runBirthdayCheck();
-  setInterval(runBirthdayCheck, 15 * 60 * 1000);
+
+  runAvisos();
+  setInterval(runAvisos, 15 * 60 * 1000);
 });
 
 // ---------- API HTTP ----------
