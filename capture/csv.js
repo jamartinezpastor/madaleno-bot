@@ -102,4 +102,24 @@ function get(obj, keys) {
   return undefined;
 }
 
-module.exports = { parse, parseFile, get };
+/**
+ * Divide UNA línea en campos, sin la detección de cabecera de parse().
+ * Necesario para editar ficheros línea a línea: parse() interpretaría
+ * "evento,3,10,..." como cabecera porque contiene palabras conocidas.
+ */
+function campos(linea) {
+  return splitLine(linea, detectDelimiter(linea));
+}
+
+/** Escapa un valor para escribirlo en CSV. */
+function escapa(v) {
+  const t = String(v == null ? '' : v);
+  return /[",;\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+}
+
+/** Convierte una fila (array) en línea CSV. */
+function linea(campos) {
+  return campos.map(escapa).join(',');
+}
+
+module.exports = { parse, parseFile, get, escapa, linea, campos };

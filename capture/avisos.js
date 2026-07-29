@@ -124,9 +124,15 @@ async function pendientes(db, chatId, cfg) {
     'INSERT OR IGNORE INTO avisos_enviados (chat_id, clave, ymd) VALUES (?, ?, ?)'
   );
 
+  const entradas = (cfg.calendario || []).filter((e) => {
+    if (e.day !== day || e.month !== month) return false;
+    if (e.aviso === false) return false;           // aviso desactivado
+    if (e.repite === 'unavez' && e.year && e.year !== year) return false;
+    return true;
+  });
+
   // --- Cumpleaños ---
-  for (const p of cfg.cumples || []) {
-    if (p.day !== day || p.month !== month) continue;
+  for (const p of entradas.filter((e) => e.clase === 'cumple').map((e) => ({ name: e.texto }))) {
     const clave = `cumple:${p.name}`;
     if (visto.get(chatId, clave, ymd)) continue;
     if (await yaFelicitado(db, chatId, p.name)) {
@@ -139,13 +145,12 @@ async function pendientes(db, chatId, cfg) {
     console.log(`[avisos] Felicitando a ${p.name} en ${chatId}.`);
   }
 
-  // --- Eventos / recordatorios ---
-  for (const e of cfg.eventos || []) {
-    if (e.day !== day || e.month !== month) continue;
-    if (e.year && e.year !== year) continue; // evento de un año concreto
-    const clave = `evento:${e.texto}`;
+  // --- Eventos y efemérides con aviso activado ---
+  for (const e of entradas.filter((e) => e.clase !== 'cumple')) {
+    const clave = `${e.clase}:${e.texto}`;
     if (visto.get(chatId, clave, ymd)) continue;
-    salida.push(`📅 *Hoy:* ${e.texto}`);
+    const icono = e.clase === 'efemeride' ? '📜' : '📅';
+    salida.push(`${icono} *Hoy:* ${e.texto}`);
     marcar.run(chatId, clave, ymd);
     console.log(`[avisos] Recordando "${e.texto}" en ${chatId}.`);
   }

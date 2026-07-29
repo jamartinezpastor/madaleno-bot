@@ -76,6 +76,7 @@ function ayuda(botNumber, grupos) {
     '*Pulsa y envía:*',
     `• ${l(`${TRIGGER} miresumen`)}`,
     `• ${l(`${TRIGGER} miresumen semana`)}`,
+    `• ${l(`${TRIGGER} web`)}  → editar el calendario (si eres admin)`,
   ];
   if (grupos && grupos.length > 1) {
     lineas.push('', 'Compartimos varios grupos, elige uno:');
@@ -199,7 +200,15 @@ function ordenPrevio(userId, grupos) {
  */
 async function handlePrivate(
   db,
-  { body, userId, getGruposDelUsuario, botNumber, nombre }
+  {
+    body,
+    userId,
+    getGruposDelUsuario,
+    getGruposComoAdmin,
+    getEnlaceCalendario,
+    botNumber,
+    nombre,
+  }
 ) {
   const texto = String(body || '').trim();
   if (!texto) return null;
@@ -241,6 +250,45 @@ async function handlePrivate(
     ? texto.slice(TRIGGER.length).trim()
     : texto;
   const lower = norm(sinTrigger);
+
+  // --- Enlaces a la web del calendario (solo administradores) ---
+  if (/^(web|calendario|editar|agenda)/.test(lower)) {
+    if (!getGruposComoAdmin || !getEnlaceCalendario) {
+      return 'La web del calendario no está configurada.';
+    }
+    let comoAdmin = [];
+    try {
+      comoAdmin = (await getGruposComoAdmin()) || [];
+    } catch (e) {
+      console.error('[privado] No pude comprobar administraciones:', e.message);
+    }
+    if (comoAdmin.length === 0) {
+      return (
+        'Solo los administradores de un grupo pueden editar su calendario.\n' +
+        'Si crees que deberías poder, pide que te hagan admin del grupo.'
+      );
+    }
+    const lineas = ['🗓️ *Editar el calendario*', ''];
+    let alguno = false;
+    for (const g of comoAdmin) {
+      const url = getEnlaceCalendario(g.id);
+      if (url) {
+        alguno = true;
+        lineas.push(`*${g.nombre}*\n${url}`, '');
+      }
+    }
+    if (!alguno) {
+      return (
+        'La web no tiene dominio configurado todavía (falta WEB_BASE_URL).\n' +
+        'Mientras tanto puedes usar `@madaleno añade ...` en el grupo.'
+      );
+    }
+    lineas.push(
+      '_Enlaces personales y temporales. No los reenvíes: quien los tenga_',
+      '_puede editar ese calendario._'
+    );
+    return lineas.join('\n');
+  }
 
   if (/^(ayuda|help|comandos|hola|\?)/.test(lower) || lower === '') {
     anotarLista(userId, grupos, 1);

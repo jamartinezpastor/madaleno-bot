@@ -21,6 +21,8 @@ const qa = require('./qa');
 const avisos = require('./avisos');
 const groups = require('./groups');
 const personal = require('./personal');
+const tokens = require('./token');
+const web = require('./web');
 
 // ---------- Configuración ----------
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
@@ -297,6 +299,23 @@ async function gruposDelUsuario(userId) {
   return salida;
 }
 
+async function gruposDondeEsAdmin(userId) {
+  const digitos = String(userId).split('@')[0].replace(/\D/g, '');
+  const salida = [];
+  for (const g of await gruposDelUsuario(userId)) {
+    const admins = await adminsDelGrupo(g.id);
+    if (
+      Array.isArray(admins) &&
+      admins.some(
+        (a) => String(a).split('@')[0].replace(/\D/g, '') === digitos
+      )
+    ) {
+      salida.push(g);
+    }
+  }
+  return salida;
+}
+
 const nombresChat = new Map();
 
 // ---- Administradores reales del grupo ----
@@ -377,6 +396,8 @@ async function atenderPrivado(msg) {
       botNumber:
         (client.info && client.info.wid && client.info.wid.user) || null,
       getGruposDelUsuario: () => gruposDelUsuario(from),
+      getGruposComoAdmin: () => gruposDondeEsAdmin(from),
+      getEnlaceCalendario: (chatId) => enlaceCalendario(from, chatId),
     });
 
     if (respuesta) await client.sendMessage(from, respuesta);
@@ -449,6 +470,9 @@ client.on('message_create', async (msg) => {
       getGroupAdmins: () => adminsDelGrupo(chatId),
       // Datos para la orla (participantes, nombres y fotos).
       getDatosOrla: (sobrescrituras) => datosOrla(chatId, sobrescrituras),
+      // Enlace a la web del calendario (solo se entrega por privado).
+      botNumber: (client.info && client.info.wid && client.info.wid.user) || null,
+      getEnlaceCalendario: (uid, horas) => enlaceCalendario(uid, chatId, horas),
       // El GIF se renderiza con el Chromium que ya usa WhatsApp Web.
       getBrowser: () => client.pupBrowser,
     });
@@ -727,6 +751,59 @@ app.post('/send', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`[http] API de captura en :${PORT}`));
+
+// ---------- Web del calendario (público, con enlace firmado) ----------
+const WEB_PORT = parseInt(process.env.WEB_PORT || '3001', 10);
+const WEB_BASE = process.env.WEB_BASE_URL || '';
+const secretoWeb = tokens.secretoDe(db);
+
+web.arrancar({
+  db,
+  docsDir: DOCS_DIR,
+  secreto: secretoWeb,
+  puerto: WEB_PORT,
+  // Cada cambio hecho por la web se anuncia en el grupo: si alguien usa un
+  // enlace que no le correspondía, queda a la vista de todos.
+  onCambio: async ({ chatId, userId, accion, texto }) => {
+    try {
+      let quien = nombreDesdeBD(userId);
+      if (!quien) {
+        try {
+          const c = await client.getContactById(userId);
+          quien = c.name || c.pushname || null;
+        } catch (_) {}
+      }
+      await client.sendMessage(
+        chatId,
+        `🗓️ ${quien || 'Alguien'} ${accion} en el calendario: *${texto}*`
+      );
+    } catch (e) {
+      console.error('[web] No pude avisar del cambio:', e.message);
+    }
+  },
+  nombreDeGrupo: async (chatId) => {
+    if (nombresChat.has(chatId)) return nombresChat.get(chatId);
+    try {
+      const chat = await client.getChatById(chatId);
+      const n = (chat && chat.name) || null;
+      nombresChat.set(chatId, n);
+      return n;
+    } catch (_) {
+      return null;
+    }
+  },
+});
+
+/** Enlace de edición para un admin y un grupo. */
+function enlaceCalendario(userId, chatId, horas) {
+  if (!WEB_BASE) return null;
+  const t = tokens.crear(
+    secretoWeb,
+    { userId, chatId },
+    horas ? horas * 3600_000 : undefined
+  );
+  return `${WEB_BASE.replace(/\/$/, '')}/c/${encodeURIComponent(t)}`;
+}
 
 // Cierre limpio
 for (const sig of ['SIGINT', 'SIGTERM']) {

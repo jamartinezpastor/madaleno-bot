@@ -62,6 +62,7 @@ function leerUnificado(parsed) {
     efemerides: [],
     datos: [],
     nombres: {}, // telefono -> nombre a mostrar (para la orla)
+    calendario: [], // eventos unificados (cumple/evento/efemeride)
   };
 
   for (const fila of parsed.objects) {
@@ -95,18 +96,53 @@ function leerUnificado(parsed) {
       case 'cumple':
       case 'cumpleanos':
       case 'cumpleaños':
-        if (fechaOk && texto) cfg.cumples.push({ name: texto, day: d, month: m });
-        break;
       case 'evento':
       case 'recordatorio':
-        if (fechaOk && texto)
-          cfg.eventos.push({ texto, day: d, month: m, year: y || null });
-        break;
       case 'efemeride':
-      case 'efemerides':
-        if (fechaOk && texto)
-          cfg.efemerides.push({ texto, day: d, month: m, year: y || null });
+      case 'efemerides': {
+        if (!fechaOk || !texto) break;
+        const clase = tipo.startsWith('cumple')
+          ? 'cumple'
+          : tipo.startsWith('efemerid')
+            ? 'efemeride'
+            : 'evento';
+
+        // repite: "anual" (todos los años) o "unavez" (solo esa fecha).
+        // Por defecto: los cumpleaños y efemérides son anuales; un evento
+        // con año concreto ocurre una sola vez.
+        const repiteCol = normaliza(csv.get(fila, ['repite', 'repeticion', 'recurrente']));
+        let repite = repiteCol.startsWith('anual') || repiteCol === 'si'
+          ? 'anual'
+          : repiteCol.startsWith('una') || repiteCol === 'no'
+            ? 'unavez'
+            : clase === 'evento' && y
+              ? 'unavez'
+              : 'anual';
+
+        // aviso: ¿se anuncia en el grupo ese día? Por defecto sí, salvo
+        // las efemérides (esas se consultan a demanda).
+        const avisoCol = normaliza(csv.get(fila, ['aviso', 'recuerda', 'recordatorio_activo']));
+        const aviso = avisoCol
+          ? /^(si|s|1|true|yes)/.test(avisoCol)
+          : clase !== 'efemeride';
+
+        const entrada = {
+          clase,
+          texto,
+          day: d,
+          month: m,
+          year: y || null,
+          repite,
+          aviso,
+        };
+        cfg.calendario.push(entrada);
+
+        // Compatibilidad con los consumidores actuales
+        if (clase === 'cumple') cfg.cumples.push({ name: texto, day: d, month: m, aviso });
+        else if (clase === 'efemeride') cfg.efemerides.push(entrada);
+        else cfg.eventos.push(entrada);
         break;
+      }
       case 'nombre': {
         // "nombre,,,,34699111222 | María García" (también vale "=")
         const partes = String(texto).split(/\s*[|=]\s*/);
@@ -138,6 +174,7 @@ function leerLegado(fichero, parsed) {
     efemerides: [],
     datos: [],
     nombres: {},
+    calendario: [],
   };
   const nombre = normaliza(fichero);
 
@@ -163,7 +200,11 @@ function leerLegado(fichero, parsed) {
         }
       }
       if (name && d >= 1 && d <= 31 && m >= 1 && m <= 12) {
-        cfg.cumples.push({ name, day: d, month: m });
+        cfg.cumples.push({ name, day: d, month: m, aviso: true });
+        cfg.calendario.push({
+          clase: 'cumple', texto: name, day: d, month: m,
+          year: null, repite: 'anual', aviso: true,
+        });
       }
     } else if (nombre.startsWith('efemerid')) {
       const texto = csv.get(f, [
@@ -176,12 +217,13 @@ function leerLegado(fichero, parsed) {
         'c3',
       ]);
       if (texto && dia >= 1 && mes >= 1) {
-        cfg.efemerides.push({
-          texto,
-          day: dia,
-          month: mes,
+        const e = {
+          clase: 'efemeride', texto, day: dia, month: mes,
           year: anio ? parseInt(anio, 10) : null,
-        });
+          repite: 'anual', aviso: false,
+        };
+        cfg.efemerides.push(e);
+        cfg.calendario.push(e);
       }
     } else {
       // Cualquier otro CSV antiguo: conocimiento general.
@@ -269,6 +311,7 @@ function paraChat(docsDir, chatId) {
     tieneFichero: propios.length > 0,
     ficheros: propios.map((c) => c.fichero),
     nombres,
+    calendario: unir('calendario'),
     cumples: unir('cumples'),
     eventos: unir('eventos'),
     efemerides: unir('efemerides'),

@@ -18,7 +18,10 @@ services:
       - ./data/docs/cumples.csv:/data/docs/cumples.csv
       - ./data/docs/efemerides.csv:/data/docs/efemerides.csv
     ports:
-      # Solo accesible desde el propio servidor (no expuesto a Internet).
+      # API interna: solo desde el propio servidor.
       - "127.0.0.1:3000:3000"
+      # Web del calendario: en Coolify se publica con un dominio propio
+      # (Configuration → Domains → https://cal.tudominio.com:3001).
+      - "127.0.0.1:3001:3001"
     # Chromium (Puppeteer) necesita memoria compartida
     shm_size: "1gb"

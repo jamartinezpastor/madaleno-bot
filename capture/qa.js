@@ -21,10 +21,20 @@ const gemini = require('./gemini');
 const ephemeris = require('./ephemeris');
 const gifmaker = require('./gifmaker');
 const orla = require('./orla');
+const calendario = require('./calendario');
 
 // ---------- Configuración ----------
 const BOT_TRIGGER = (process.env.BOT_TRIGGER || '@madaleno').toLowerCase();
 const RATE_PER_HOUR = parseInt(process.env.QA_RATE_PER_HOUR || '20', 10);
+// ¿Publicar el enlace de edición en el propio grupo? Cómodo, pero deja
+// editar a cualquier miembro: el enlace es la credencial.
+const PUBLICO_RATE_PER_HOUR = parseInt(
+  process.env.PUBLICO_RATE_PER_HOUR || '10',
+  10
+);
+const LINK_EN_GRUPO =
+  String(process.env.WEB_LINK_EN_GRUPO || 'false').toLowerCase() === 'true';
+const LINK_GRUPO_HORAS = parseInt(process.env.WEB_LINK_GRUPO_HORAS || '2', 10);
 const GIF_RATE_PER_HOUR = parseInt(process.env.GIF_RATE_PER_HOUR || '5', 10);
 
 // CSV reservados: no forman parte del "conocimiento" para preguntas.
@@ -295,6 +305,11 @@ ${msgCtx || '(sin contexto)'}
   return gemini.generate(system, user, { temperature: 0.2, maxTokens: 700 });
 }
 
+// ---------- Calendario ----------
+// Recuerda la última lista mostrada en cada grupo para que "borra 2"
+// signifique lo mismo que la persona vio.
+const ultimoCalendario = new Map();
+
 // ---------- Rate limiting ----------
 const rateMap = new Map();
 const gifRateMap = new Map();
@@ -515,7 +530,10 @@ async function informeBusqueda(db, chatId, entrada) {
  */
 async function handleIncoming(
   db,
-  { body, authorId, chatId, docsDir, getBrowser, getGroupAdmins, getDatosOrla }
+  {
+    body, authorId, chatId, docsDir, getBrowser, getGroupAdmins,
+    getDatosOrla, botNumber, getEnlaceCalendario,
+  }
 ) {
   if (!body) return null;
   const trimmed = body.trim();
@@ -524,49 +542,78 @@ async function handleIncoming(
   // Datos de ESTE grupo: los comunes + los de su CSV (si lo tiene).
   const cfg = groups.paraChat(docsDir, chatId);
 
-  // Quién manda aquí: los administradores del grupo en WhatsApp. Punto.
-  // No hay listas que mantener en ningún fichero.
+  const rest = trimmed.slice(BOT_TRIGGER.length).trim();
+  const lower = norm(rest);
+
+  // ---- Comandos abiertos a cualquier miembro del grupo ----
+  // Son gratis (no usan IA) y de solo lectura.
+  const esPublico = /^(eventos|ayuda|help|comandos|\?)/.test(lower) || !rest;
+
+  // Quién manda aquí: los administradores del grupo en WhatsApp.
   let autorizados = null;
   try {
     autorizados = getGroupAdmins ? await getGroupAdmins() : null;
   } catch (e) {
     console.error('[qa] No pude obtener los admins del grupo:', e.message);
   }
+  const esAdmin =
+    Array.isArray(autorizados) && esAutorizado(authorId, autorizados);
 
-  if (!Array.isArray(autorizados)) {
-    console.error(
-      '[qa] Sin lista de administradores: no atiendo el comando por ahora.'
-    );
-    return null;
+  if (!esPublico) {
+    if (!Array.isArray(autorizados)) {
+      console.error(
+        '[qa] Sin lista de administradores: no atiendo el comando por ahora.'
+      );
+      return null;
+    }
+    if (!esAdmin) {
+      console.log(`[qa] Ignorado (no es admin del grupo): ${authorId}`);
+      return null;
+    }
   }
 
-  if (!esAutorizado(authorId, autorizados)) {
-    console.log(`[qa] Ignorado (no es admin del grupo): ${authorId}`);
-    return null;
-  }
+  const AYUDA_TODOS =
+    '🤖 *Madaleno*\n' +
+    '• `eventos` — próximos 30 días del calendario\n' +
+    '• `ayuda` — esta lista\n' +
+    `_Por privado puedes pedirme ${BOT_TRIGGER} miresumen: solo lo que te afecta._`;
 
-  const rest = trimmed.slice(BOT_TRIGGER.length).trim();
-  const lower = norm(rest);
-
-  const AYUDA =
-    '🤖 *Madaleno* — esto sé hacer:\n' +
+  const AYUDA_ADMIN =
+    '*Como admin:*\n' +
     '• `resumen` — las últimas 24 h en 2 líneas\n' +
     '• `info` — estadísticas del grupo\n' +
     '• `gif` — animación con humor de lo que se habla\n' +
     '• `orla` — orla con las fotos del grupo\n' +
     '• `busca <palabras>` — encuentra mensajes antiguos\n' +
+    '• `calendario` — enlace privado para editar el calendario\n' +
+    '• `añade 3/10 Cena` — apunta un evento (`borra 2` lo quita)\n' +
     '• `efemérides` — qué pasó un día como hoy\n' +
-    '• `<pregunta>` — respondo con mis datos y el historial\n' +
-    `_Escribe ${BOT_TRIGGER} y el comando._`;
+    '• `<pregunta>` — respondo con mis datos y el historial';
+
+  const AYUDA = esAdmin ? `${AYUDA_TODOS}\n\n${AYUDA_ADMIN}` : AYUDA_TODOS;
 
   if (!rest) return AYUDA;
 
-  if (!checkRate(rateMap, authorId, RATE_PER_HOUR)) {
-    return 'Has alcanzado el límite de peticiones por hora. Prueba más tarde.';
+  // Los comandos públicos también tienen tope, más generoso: son gratis
+  // pero no queremos que nadie inunde el grupo con listados.
+  const tope = esPublico ? PUBLICO_RATE_PER_HOUR : RATE_PER_HOUR;
+  if (!checkRate(rateMap, authorId, tope)) {
+    return esPublico ? null : 'Has alcanzado el límite por hora. Prueba luego.';
   }
 
   try {
     if (/^(ayuda|help|comandos|\?)/.test(lower)) return AYUDA;
+
+    // Público: lista de solo lectura, 30 días
+    if (/^eventos/.test(lower)) {
+      const lista = calendario.proximos(cfg, 30);
+      ultimoCalendario.set(chatId, lista);
+      // A quien no es admin no se le anuncian los comandos de edición.
+      return calendario.informe(cfg, 30, {
+        publico: !esAdmin,
+        titulo: 'Eventos',
+      });
+    }
     if (/^resum/.test(lower)) return await summarize24h(db, chatId);
     if (/^(info|stats|estad)/.test(lower)) return await infoReport(db, chatId);
     if (/^(efemerid|efemer)/.test(lower))
@@ -583,6 +630,69 @@ async function handleIncoming(
       }
       const media = await gifmaker.crearGif(getBrowser, transcript(rows.slice(-250)));
       return { media };
+    }
+
+    if (/^(calendario|web|editar|agenda)/.test(lower)) {
+      // Modo "enlace en el grupo": cómodo, pero cualquiera del grupo podrá
+      // editar. Se avisa expresamente y el enlace dura poco.
+      if (LINK_EN_GRUPO && getEnlaceCalendario) {
+        const url = getEnlaceCalendario(authorId, LINK_GRUPO_HORAS);
+        if (url) {
+          return (
+            `🗓️ *Calendario del grupo*\n${url}\n\n` +
+            `⚠️ Cualquiera del grupo que pulse este enlace puede editar el ` +
+            `calendario (el enlace es la llave, no comprueba quién eres). ` +
+            `Caduca en ${LINK_GRUPO_HORAS} h y los cambios se anuncian aquí.`
+          );
+        }
+      }
+      const url = botNumber
+        ? `https://wa.me/${String(botNumber).replace(/\D/g, '')}?text=${encodeURIComponent(BOT_TRIGGER + ' web')}`
+        : null;
+      return (
+        '🗓️ Te paso el enlace de edición *por privado*, para que no quede ' +
+        'visible en el grupo.\n' +
+        (url ? `Pulsa y envía: ${url}` : `Escríbeme por privado: ${BOT_TRIGGER} web`)
+      );
+    }
+
+    if (/^(a[nñ]ade|a[nñ]adir|nuevo|apunta|agrega)\b/.test(lower)) {
+      const resto2 = rest.replace(/^\S+\s*/, '').trim();
+      if (!resto2) {
+        return (
+          'Dime qué apunto:\n' +
+          '• `@madaleno añade 3/10 Cena de empresa`\n' +
+          '• `@madaleno añade cumple 16/5 María`\n' +
+          '• `@madaleno añade 1/9 Vuelta al cole sin aviso`'
+        );
+      }
+      const r = await calendario.añadir(docsDir, chatId, resto2);
+      if (r.error) return `⚠️ ${r.error}`;
+      const e = r.evento;
+      const f = `${String(e.day).padStart(2, '0')}/${String(e.month).padStart(2, '0')}`;
+      return (
+        `✅ Apuntado: *${e.texto}*\n` +
+        `${f}${e.year ? '/' + e.year : ''} · ` +
+        `${e.repite === 'anual' ? 'cada año' : 'una sola vez'} · ` +
+        `${e.aviso ? 'avisaré en el grupo ese día' : 'sin aviso'}`
+      );
+    }
+
+    if (/^(borra|borrar|elimina|quita)\b/.test(lower)) {
+      const arg = rest.replace(/^\S+\s*/, '').trim();
+      const n = parseInt(arg, 10);
+      const lista = ultimoCalendario.get(chatId);
+      if (!lista || lista.length === 0) {
+        return 'Primero muestra el calendario con `@madaleno calendario`.';
+      }
+      if (!n || n < 1 || n > lista.length) {
+        return `Dime el número de la lista (1-${lista.length}).`;
+      }
+      const e = lista[n - 1];
+      const r = await calendario.borrar(docsDir, chatId, e);
+      if (r.error) return `⚠️ ${r.error}`;
+      ultimoCalendario.delete(chatId);
+      return `🗑️ Borrado: *${e.texto}*`;
     }
 
     if (/^(busca|buscar|search)\b/.test(lower)) {
