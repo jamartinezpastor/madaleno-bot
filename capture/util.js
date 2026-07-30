@@ -91,4 +91,15 @@ const SQL_CON_CONTENIDO =
   "type NOT IN ('e2e_notification','notification_template','notification'," +
   "'call_log','gp2','revoked','ciphertext')";
 
-module.exports = { norm, soloDigitos, mismoNumero, crearLimitador, stmt, SQL_CON_CONTENIDO };
+/** Disparador del bot, centralizado para que todos los módulos vean el mismo. */
+const TRIGGER = (process.env.BOT_TRIGGER || '@madaleno').toLowerCase();
+
+module.exports = {
+  norm,
+  soloDigitos,
+  mismoNumero,
+  crearLimitador,
+  stmt,
+  SQL_CON_CONTENIDO,
+  TRIGGER,
+};

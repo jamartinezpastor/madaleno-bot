@@ -601,7 +601,7 @@ async function atenderPrivado(msg) {
     } catch (_) {}
 
     const respuesta = await personal.handlePrivate(db, {
-      body: msg.body || '',
+      body: normalizarMencionAlBot(msg, msg.body || ''),
       userId: from,
       nombre,
       botNumber:
@@ -619,6 +619,53 @@ async function atenderPrivado(msg) {
 
 // 'message_create' se dispara con cualquier mensaje del chat
 // (entrantes y propios), sin necesidad de que tú lo abras/leas.
+/**
+ * Cuando el número del bot está guardado en la agenda de quien escribe
+ * (p.ej. como "Madaleno"), WhatsApp puede convertir "@Madaleno" en una
+ * MENCIÓN REAL en vez de dejarlo como texto. El cuerpo que llega entonces
+ * no es "@Madaleno info": suele ser "@<número o LID> info", con el nombre
+ * mostrado solo como sustitución visual en la pantalla. Comparar ese
+ * texto contra "@madaleno" nunca coincide, así que el bot se queda mudo
+ * SOLO para quien tiene el contacto guardado, sea cual sea la
+ * mayúscula/minúscula usada — no es un problema de mayúsculas.
+ *
+ * Aquí se detecta esa mención real (msg.mentionedIds incluye al propio
+ * bot) y se sustituye el primer token "@algo" por el disparador
+ * configurado, para que el resto del bot vea siempre lo mismo que si se
+ * hubiera escrito a mano.
+ */
+function normalizarMencionAlBot(msg, textoOriginal) {
+  try {
+    const yo = client.info && client.info.wid && client.info.wid._serialized;
+    if (!yo || !Array.isArray(msg.mentionedIds) || msg.mentionedIds.length === 0) {
+      return textoOriginal;
+    }
+    const meMencionan = msg.mentionedIds.some((id) => util.mismoNumero(id, yo));
+    if (!meMencionan) {
+      // Diagnóstico: si esto sale con frecuencia y el mensaje va dirigido
+      // claramente al bot, es probable que mentionedIds use un formato
+      // (LID) distinto al de client.info.wid (número clásico), y esta
+      // normalización no podría detectarlo. Este log ayuda a confirmarlo
+      // sin tener que adivinar.
+      console.log(
+        `[mencion] Mención sin identificar como propia. yo=${yo} ` +
+          `mentionedIds=${msg.mentionedIds.join(',')}`
+      );
+      return textoOriginal;
+    }
+
+    const t = String(textoOriginal || '');
+    // Si ya empieza con el disparador en texto plano, no hay nada que
+    // normalizar (lo escribieron a mano, no es una mención real).
+    if (t.trim().toLowerCase().startsWith(util.TRIGGER)) return t;
+
+    return t.replace(/^@\S+\s*/, `${util.TRIGGER} `);
+  } catch (e) {
+    console.error('[mencion] Error normalizando:', e.message);
+    return textoOriginal;
+  }
+}
+
 client.on('message_create', async (msg) => {
   // 1) Identificar el grupo SIN llamar a getChat(): el id del chat ya
   //    viene en el propio mensaje. En un grupo, uno de los dos extremos
@@ -637,6 +684,12 @@ client.on('message_create', async (msg) => {
 
   const authorId = msg.author || msg.from || null;
 
+  // Si es una mención real al bot (contacto guardado en la agenda de quien
+  // escribe), el cuerpo crudo no empieza por el disparador de texto. Se
+  // normaliza una sola vez y se usa tanto para guardar como para procesar
+  // el comando, así el resto del bot no necesita saber nada de menciones.
+  const bodyNormalizado = normalizarMencionAlBot(msg, msg.body || '');
+
   // 2) Guardar el mensaje. Aislado: si algo falla aquí, el bot todavía
   //    puede responder al comando.
   try {
@@ -649,7 +702,7 @@ client.on('message_create', async (msg) => {
       chat_name: await nombreDelChat(msg, chatId),
       author_id: authorId,
       author_name: authorName,
-      body: msg.body || '',
+      body: bodyNormalizado,
       type: msg.type || 'chat',
       ts: msg.timestamp || Math.floor(Date.now() / 1000),
       captured_at: Date.now(),
@@ -657,7 +710,7 @@ client.on('message_create', async (msg) => {
       // tener el historial completo) pero se excluyen de resúmenes,
       // estadísticas y GIF, porque son ruido generado por él mismo.
       from_me: msg.fromMe ? 1 : 0,
-      body_norm: util.norm(msg.body || ''),
+      body_norm: util.norm(bodyNormalizado),
     });
 
     // Log de descubrimiento: ayuda a encontrar el id del grupo y el tuyo.
@@ -674,7 +727,7 @@ client.on('message_create', async (msg) => {
   // 3) Comandos del bot. Con su propio try/catch y trazas completas.
   try {
     const reply = await qa.handleIncoming(db, {
-      body: msg.body || '',
+      body: bodyNormalizado,
       authorId,
       chatId,
       docsDir: DOCS_DIR,

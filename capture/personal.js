@@ -23,7 +23,7 @@ const gemini = require('./gemini');
 const util = require('./util');
 const admins = require('./admins');
 
-const TRIGGER = (process.env.BOT_TRIGGER || '@madaleno').toLowerCase();
+const TRIGGER = util.TRIGGER;
 const RATE_PER_HOUR = parseInt(process.env.QA_RATE_PER_HOUR || '20', 10);
 
 function initSchema(db) {

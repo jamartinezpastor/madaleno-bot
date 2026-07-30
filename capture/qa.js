@@ -26,7 +26,7 @@ const orla = require('./orla');
 const calendario = require('./calendario');
 
 // ---------- Configuración ----------
-const BOT_TRIGGER = (process.env.BOT_TRIGGER || '@madaleno').toLowerCase();
+const BOT_TRIGGER = util.TRIGGER;
 const RATE_PER_HOUR = parseInt(process.env.QA_RATE_PER_HOUR || '20', 10);
 // ¿Publicar el enlace de edición en el propio grupo? Cómodo, pero deja
 // editar a cualquier miembro: el enlace es la credencial.
