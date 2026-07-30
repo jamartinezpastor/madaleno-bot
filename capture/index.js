@@ -20,6 +20,7 @@ const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qa = require('./qa');
 const avisos = require('./avisos');
 const groups = require('./groups');
+const admins = require('./admins');
 const util = require('./util');
 const personal = require('./personal');
 const tokens = require('./token');
@@ -157,6 +158,20 @@ const insertStmt = db.prepare(`
 qa.initSchema(db);
 avisos.initSchema(db);
 personal.initSchema(db);
+admins.initSchema(db);
+
+// Si no se configura un código de alta, se genera uno y se muestra aquí:
+// así no hay que inventarse ni configurar nada, basta con mirar los logs.
+if (!process.env.ADMIN_SETUP_CODE) {
+  process.env.ADMIN_SETUP_CODE = require('crypto')
+    .randomBytes(3)
+    .toString('hex')
+    .toUpperCase();
+  console.log(
+    `[admins] Código de alta de esta sesión: ${process.env.ADMIN_SETUP_CODE}\n` +
+      '         Solo hace falta si no puedo leer los admins de WhatsApp.'
+  );
+}
 
 // ---------- Cliente WhatsApp ----------
 const client = new Client({
@@ -386,10 +401,87 @@ const nombresChat = new Map();
 const cacheAdmins = new Map(); // chatId -> { ids: [], ts }
 const ADMIN_TTL_MS = 10 * 60 * 1000;
 
-async function adminsDelGrupo(chatId) {
+// Estancia temporal: bug abierto y sin resolver en whatsapp-web.js donde
+// getChatById falla con un "Puppeteer error r: r" tras actualizaciones
+// recientes de WhatsApp Web (github.com/wwebjs/whatsapp-web.js#201838,
+// reproducido incluso en la última versión estable). Mientras dure,
+// ADMIN_FALLBACK_IDS permite seguir operando sin depender de esa llamada.
+/**
+ * Lee los administradores directamente del almacén interno de WhatsApp Web.
+ *
+ * getChatById falla ("Puppeteer error r: r") porque hace mucho más de lo
+ * necesario: serializa modelos, resuelve LIDs, distingue canales... y algo
+ * de eso se rompe con cada cambio de WhatsApp Web. Aquí solo se pide una
+ * cosa concreta, y cualquier error se devuelve como texto en vez de
+ * propagarse, así que no puede tumbar nada.
+ */
+async function adminsPorStore(chatId) {
+  if (!client.pupPage) return null;
+
+  const res = await client.pupPage
+    .evaluate(async (id) => {
+      try {
+        const S = window.Store;
+        if (!S || !S.GroupMetadata) return { error: 'sin store' };
+
+        let meta = S.GroupMetadata.get ? S.GroupMetadata.get(id) : null;
+        if ((!meta || !meta.participants) && S.GroupMetadata.find) {
+          meta = await S.GroupMetadata.find(id);
+        }
+        const p = meta && meta.participants;
+        if (!p) return { error: 'sin participantes' };
+
+        // La colección puede venir de varias formas según la versión.
+        const lista = p.getModelsArray
+          ? p.getModelsArray()
+          : Array.isArray(p)
+            ? p
+            : p._models || [];
+
+        const admins = lista
+          .filter((x) => x && (x.isAdmin || x.isSuperAdmin))
+          .map((x) => {
+            const i = x.id;
+            if (!i) return null;
+            if (typeof i === 'string') return i;
+            if (i._serialized) return i._serialized;
+            return i.user ? `${i.user}@${i.server || 'c.us'}` : null;
+          })
+          .filter(Boolean);
+
+        return { admins, total: lista.length };
+      } catch (e) {
+        return { error: String((e && e.message) || e) };
+      }
+    }, chatId)
+    .catch((e) => ({ error: String((e && e.message) || e) }));
+
+  if (!res || res.error) {
+    console.error(`[admins] Store: ${(res && res.error) || 'sin respuesta'}`);
+    return null;
+  }
+  console.log(
+    `[admins] Store: ${res.admins.length} admin(es) de ${res.total} miembros`
+  );
+  return res.admins;
+}
+
+async function adminsDelGrupo(chatId, intento = 0) {
   const cached = cacheAdmins.get(chatId);
   if (cached && Date.now() - cached.ts < ADMIN_TTL_MS) return cached.ids;
 
+  // 1) Camino propio: leer el almacén interno. Evita el bug de la librería.
+  try {
+    const porStore = await adminsPorStore(chatId);
+    if (Array.isArray(porStore) && porStore.length > 0) {
+      cacheAdmins.set(chatId, { ids: porStore, ts: Date.now() });
+      return porStore;
+    }
+  } catch (e) {
+    console.error('[admins] Store falló:', e.message);
+  }
+
+  // 2) Camino de la librería (por si algún día vuelve a funcionar).
   try {
     const chat = await client.getChatById(chatId);
     if (!chat || !chat.isGroup || !Array.isArray(chat.participants)) return null;
@@ -403,10 +495,14 @@ async function adminsDelGrupo(chatId) {
     console.log(`[admins] ${chatId}: ${ids.length} administrador(es)`);
     return ids;
   } catch (e) {
+    // Un reintento corto: a veces falla justo tras 'ready', antes de que
+    // el store interno de WhatsApp Web termine de cargar.
+    if (intento === 0) {
+      await new Promise((r) => setTimeout(r, 1500));
+      return adminsDelGrupo(chatId, 1);
+    }
     console.error(`[admins] No pude leer los admins de ${chatId}:`, e.message);
-    // Si ya se leyeron antes, se sigue usando esa lista aunque haya
-    // caducado: es mejor que quedarse sin obedecer a nadie por un fallo
-    // puntual de WhatsApp Web.
+    // No pasa nada: la autorización usa el registro propio del bot.
     return cached ? cached.ids : null;
   }
 }
@@ -534,6 +630,10 @@ client.on('message_create', async (msg) => {
       // Enlace a la web del calendario (solo se entrega por privado).
       botNumber: (client.info && client.info.wid && client.info.wid.user) || null,
       getEnlaceCalendario: (uid, horas) => enlaceCalendario(uid, chatId, horas),
+      // Mensaje citado: permite dar de alta a alguien respondiéndole.
+      citado: msg.hasQuotedMsg
+        ? { autorId: (msg._data && msg._data.quotedParticipant) || null }
+        : null,
       // El GIF se renderiza con el Chromium que ya usa WhatsApp Web.
       getBrowser: () => client.pupBrowser,
     });

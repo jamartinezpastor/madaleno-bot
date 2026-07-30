@@ -21,6 +21,7 @@
 
 const gemini = require('./gemini');
 const util = require('./util');
+const admins = require('./admins');
 
 const TRIGGER = (process.env.BOT_TRIGGER || '@madaleno').toLowerCase();
 const RATE_PER_HOUR = parseInt(process.env.QA_RATE_PER_HOUR || '20', 10);
@@ -66,6 +67,9 @@ function ayuda(botNumber, grupos) {
     `• ${l(`${TRIGGER} miresumen semana`)}`,
     `• ${l(`${TRIGGER} web`)}  → editar el calendario (si eres admin)`,
   ];
+  if (grupos.some((g) => !admins.hayAlguno(db, g.id))) {
+    lineas.push(`• \`${TRIGGER} alta CÓDIGO\`  → darte de alta como admin`);
+  }
   if (grupos && grupos.length > 1) {
     lineas.push('', 'Compartimos varios grupos, elige uno:');
     grupos.forEach((g, i) => {
@@ -238,6 +242,58 @@ async function handlePrivate(
     ? texto.slice(TRIGGER.length).trim()
     : texto;
   const lower = norm(sinTrigger);
+
+  // --- Alta de administrador (en privado: el código nunca se ve en el
+  //     grupo, donde puede haber decenas de personas mirando) ---
+  if (/^(alta|soyadmin|registrar)\b/.test(lower)) {
+    const partes = sinTrigger.split(/\s+/).filter(Boolean);
+    const codigo = partes[1] || '';
+    const eleccion = partes[2] || '';
+
+    if (!codigo) {
+      return (
+        'Para darte de alta como administrador:\n' +
+        `\`${TRIGGER} alta CÓDIGO\`\n\n` +
+        '_El código está en los registros del servidor; lo tiene quien ' +
+        'administra el bot._'
+      );
+    }
+
+    const candidatos = grupos.filter((g) => !admins.hayAlguno(db, g.id));
+    if (candidatos.length === 0) {
+      return (
+        'Todos tus grupos tienen ya administradores dados de alta.\n' +
+        'Pídele a uno que te añada con `admin` y tu número.'
+      );
+    }
+
+    let destino = null;
+    if (candidatos.length === 1) destino = candidatos[0];
+    else if (/^\d+$/.test(eleccion)) {
+      const i = parseInt(eleccion, 10) - 1;
+      if (i >= 0 && i < candidatos.length) destino = candidatos[i];
+    } else if (eleccion) {
+      destino =
+        candidatos.find((g) => norm(g.nombre).includes(norm(eleccion))) || null;
+    }
+
+    if (!destino) {
+      const lineas = candidatos.map(
+        (g, i) => `*${i + 1})* ${g.nombre}`
+      );
+      return (
+        '¿En qué grupo te doy de alta?\n' +
+        lineas.join('\n') +
+        `\n\nResponde: \`${TRIGGER} alta ${codigo} 1\``
+      );
+    }
+
+    const r = admins.altaConCodigo(db, destino.id, userId, codigo);
+    return r.error
+      ? `⚠️ ${r.error}`
+      : `✅ Ya administras el bot en *${destino.nombre}*.\n` +
+        `Prueba a escribir \`${TRIGGER} ayuda\` allí.`;
+  }
 
   // --- Enlaces a la web del calendario (solo administradores) ---
   if (/^(web|calendario|editar|agenda)/.test(lower)) {

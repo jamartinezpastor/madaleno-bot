@@ -54,6 +54,7 @@ En el grupo, escribiendo `@madaleno <comando>`:
 | `busca <texto>` | admins | Busca en todo el historial |
 | `calendario` | admins | Enlace privado para editar el calendario |
 | `añade 3/10 Cena` | admins | Apunta un evento (`borra 2` lo quita) |
+| `admin 34600...` | admins | Gestiona quién manda al bot |
 | `<pregunta>` | admins | Responde con tus datos, el calendario y el historial |
 
 Por privado, cualquier miembro:
@@ -143,6 +144,46 @@ A partir de `BIRTHDAY_HOUR` (11:30), el bot anuncia en cada grupo los
 | `QA_RATE_PER_HOUR`, `GIF_RATE_PER_HOUR` | Topes por admin y hora |
 | `EPHEMERIS_FALLBACK_AI` | Usar IA si el CSV no tiene efeméride |
 | `TIMEZONE` | Zona horaria (def. `Europe/Madrid`) |
+
+## Administradores
+
+Normalmente **no hay que configurar nada**: el bot lee del almacén interno
+de WhatsApp Web quiénes administran el grupo y los registra solos.
+
+Esa lectura se hace con código propio y acotado, no con `getChatById` de
+la librería, que se rompe con cada cambio de WhatsApp Web
+([bug abierto](https://github.com/wwebjs/whatsapp-web.js/issues/201838)).
+Si aun así no lo consigue, el bot lleva **su propio registro** y el primer
+administrador se da de alta **por privado** (nunca en el grupo: el código
+quedaría a la vista de todos y serviría para otros grupos):
+
+```
+(chat privado con el bot)
+@madaleno alta CODIGO        → si compartís un solo grupo
+@madaleno alta CODIGO 2      → si compartís varios, elige de la lista
+```
+
+El código es el de `ADMIN_SETUP_CODE`; si lo dejas vacío, el bot genera
+uno al arrancar y lo escribe en los logs. Solo funciona en grupos que aún
+no tengan administradores, y el alta es **por grupo**: darse de alta en
+uno no da permisos en los demás.
+
+Si alguien escribe `alta` en el grupo, el bot no acepta el código ahí:
+responde con un enlace para continuar en privado.
+
+El código **solo funciona mientras el grupo no tenga ningún admin**: en
+cuanto hay uno, deja de servir, así que aunque se filtre no vale para
+colarse. A partir de ahí, los administradores se gestionan entre ellos:
+
+```
+@madaleno admin 34600111222      dar permisos
+@madaleno admin                  (respondiendo a alguien) darle permisos
+@madaleno admin                  lista de administradores
+@madaleno admin quita 34600...   quitar permisos
+```
+
+Si WhatsApp sí responde, sus administradores se incorporan solos al
+registro y quedan guardados.
 
 ## Dónde se guarda todo
 

@@ -18,6 +18,7 @@ const path = require('path');
 const csv = require('./csv');
 const groups = require('./groups');
 const util = require('./util');
+const admins = require('./admins');
 const gemini = require('./gemini');
 const ephemeris = require('./ephemeris');
 const gifmaker = require('./gifmaker');
@@ -587,7 +588,7 @@ async function handleIncoming(
   db,
   {
     body, authorId, chatId, docsDir, getBrowser, getGroupAdmins,
-    getDatosOrla, botNumber, getEnlaceCalendario,
+    getDatosOrla, botNumber, getEnlaceCalendario, citado,
   }
 ) {
   if (!body) return null;
@@ -606,22 +607,32 @@ async function handleIncoming(
     /^(eventos|efemerid|efemer|ayuda|help|comandos|\?)/.test(lower) || !rest;
 
   // Quién manda aquí: los administradores del grupo en WhatsApp.
-  let autorizados = null;
+  // Autorización con registro PROPIO: no depende de que WhatsApp responda.
+  // Si responde, sus administradores se incorporan y quedan guardados.
+  let deWhatsApp = null;
   try {
-    autorizados = getGroupAdmins ? await getGroupAdmins() : null;
+    deWhatsApp = getGroupAdmins ? await getGroupAdmins() : null;
   } catch (e) {
-    console.error('[qa] No pude obtener los admins del grupo:', e.message);
+    console.error('[qa] Admins de WhatsApp no disponibles:', e.message);
   }
-  const esAdmin =
-    Array.isArray(autorizados) && esAutorizado(authorId, autorizados);
+  const autorizados = admins.autorizados(db, chatId, deWhatsApp);
+  const esAdmin = esAutorizado(authorId, autorizados);
 
   if (!esPublico) {
-    if (!Array.isArray(autorizados)) {
-      console.error(
-        '[qa] Sin lista de administradores: no atiendo el comando por ahora.'
+    // El alta NO se hace aquí: escribir el código en un grupo lo dejaría a
+    // la vista de todos (y serviría para otros grupos). Se redirige al
+    // chat privado, donde solo lo ve quien lo escribe.
+    if (/^(alta|soyadmin|registrar)\b/.test(lower)) {
+      const url = botNumber
+        ? `https://wa.me/${String(botNumber).replace(/\D/g, '')}?text=${encodeURIComponent(BOT_TRIGGER + ' alta ')}`
+        : null;
+      return (
+        '🔐 El alta se hace *por privado*, para no dejar el código a la ' +
+        'vista del grupo.\n' +
+        (url ? `Pulsa y envía: ${url}` : `Escríbeme por privado: ${BOT_TRIGGER} alta CÓDIGO`)
       );
-      return null;
     }
+
     if (!esAdmin) {
       console.log(`[qa] Ignorado (no es admin del grupo): ${authorId}`);
       return null;
@@ -644,6 +655,7 @@ async function handleIncoming(
     '• `busca <palabras>` — encuentra mensajes antiguos\n' +
     '• `calendario` — enlace privado para editar el calendario\n' +
     '• `añade 3/10 Cena` — apunta un evento (`borra 2` lo quita)\n' +
+    '• `admin 34600111222` — dar permisos a alguien (`admin` los lista)\n' +
     '• `<pregunta>` — respondo con mis datos y el historial';
 
   const AYUDA = esAdmin ? `${AYUDA_TODOS}\n\n${AYUDA_ADMIN}` : AYUDA_TODOS;
@@ -686,6 +698,44 @@ async function handleIncoming(
       }
       const media = await gifmaker.crearGif(getBrowser, transcript(rows.slice(-250)));
       return { media };
+    }
+
+    // --- Gestión de administradores del bot ---
+    if (/^admins?\b/.test(lower)) {
+      const arg = rest.replace(/^\S+\s*/, '').trim();
+
+      if (/^(quita|baja|elimina)/i.test(arg)) {
+        const objetivo = arg.replace(/^\S+\s*/, '').trim();
+        const quien = objetivo || (citado && citado.autorId);
+        if (!quien) return 'Dime a quién quito: `@madaleno admin quita 34600...`';
+        if (util.mismoNumero(quien, authorId)) {
+          return 'No puedes quitarte a ti mismo (que lo haga otro admin).';
+        }
+        return admins.baja(db, chatId, quien)
+          ? `🗑️ ${util.soloDigitos(quien)} ya no administra el bot aquí.`
+          : 'No lo encuentro entre los administradores registrados.';
+      }
+
+      if (arg) {
+        const nuevo = arg.replace(/\D/g, '');
+        if (nuevo.length < 8) {
+          return 'Formato: `@madaleno admin 34600111222` (con prefijo país).';
+        }
+        admins.alta(db, chatId, `${nuevo}@c.us`, 'promocion');
+        return `✅ ${nuevo} ya puede usar los comandos de administrador aquí.`;
+      }
+
+      if (citado && citado.autorId) {
+        admins.alta(db, chatId, citado.autorId, 'promocion');
+        return `✅ ${util.soloDigitos(citado.autorId)} ya administra el bot aquí.`;
+      }
+
+      const lista = admins.autorizados(db, chatId, null);
+      return lista.length
+        ? '👮 Administradores del bot aquí:\n' +
+            lista.map((x) => `• ${util.soloDigitos(x)}`).join('\n') +
+            '\n\n_Alta: `admin 34600111222` · Baja: `admin quita 34600111222`_'
+        : 'Todavía no hay administradores registrados en este grupo.';
     }
 
     if (/^(calendario|web|editar|agenda)/.test(lower)) {
