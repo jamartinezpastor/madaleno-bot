@@ -36,9 +36,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
+ENV NODE_ENV=production
+
 WORKDIR /app
 COPY package.json ./
-RUN npm install --omit=dev
+# --omit=dev y sin scripts opcionales: imagen más pequeña y arranque limpio
+RUN npm install --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY . .
 
 EXPOSE 3000

@@ -14,12 +14,13 @@
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
-const Database = require('better-sqlite3');
+const abrirBaseDatos = require('./db').abrir;
 const qrcode = require('qrcode-terminal');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qa = require('./qa');
 const avisos = require('./avisos');
 const groups = require('./groups');
+const util = require('./util');
 const personal = require('./personal');
 const tokens = require('./token');
 const web = require('./web');
@@ -37,7 +38,7 @@ const GROUP_IDS = (process.env.GROUP_IDS || '')
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ---------- Base de datos ----------
-const db = new Database(DB_PATH);
+const db = abrirBaseDatos(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.exec(`
   CREATE TABLE IF NOT EXISTS messages (
@@ -50,7 +51,8 @@ db.exec(`
     type         TEXT,
     ts           INTEGER NOT NULL,        -- epoch segundos (hora del mensaje)
     captured_at  INTEGER NOT NULL,        -- epoch ms (cuándo lo guardamos)
-    from_me      INTEGER NOT NULL DEFAULT 0  -- 1 = lo envió el propio bot
+    from_me      INTEGER NOT NULL DEFAULT 0, -- 1 = lo envió el propio bot
+    body_norm    TEXT                        -- body en minúsculas y sin tildes
   );
   CREATE INDEX IF NOT EXISTS idx_chat_ts ON messages (chat_id, ts);
 
@@ -83,6 +85,64 @@ const upsertReaction = db.prepare(`
     console.log('[db] Migración: columna from_me añadida.');
   }
 }
+
+// Migración: body_norm permite filtrar dentro de SQLite (rápido) en vez
+// de traerse decenas de miles de mensajes a memoria para normalizarlos.
+try {
+  const cols = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
+  if (!cols.includes('body_norm')) {
+    db.exec('ALTER TABLE messages ADD COLUMN body_norm TEXT');
+    console.log('[db] Migración: columna body_norm añadida.');
+  }
+  const pendientes = db
+    .prepare("SELECT COUNT(*) n FROM messages WHERE body_norm IS NULL AND body != ''")
+    .get().n;
+  if (pendientes > 0) {
+    console.log(`[db] Normalizando ${pendientes} mensajes antiguos...`);
+    const leer = db.prepare(
+      "SELECT id, body FROM messages WHERE body_norm IS NULL AND body != '' LIMIT 5000"
+    );
+    const escribir = db.prepare('UPDATE messages SET body_norm = ? WHERE id = ?');
+    let restantes = pendientes;
+    while (restantes > 0) {
+      const lote = leer.all();
+      if (lote.length === 0) break;
+      db.transaction(() => {
+        for (const f of lote) escribir.run(util.norm(f.body), f.id);
+      })();
+      restantes -= lote.length;
+    }
+    console.log('[db] Normalización completada.');
+  }
+} catch (e) {
+  console.error('[db] Migración body_norm:', e.message);
+}
+
+// Retención opcional: sin esto la base de datos crece indefinidamente.
+// 0 = guardar todo (por defecto).
+const RETENCION_DIAS = parseInt(process.env.RETENCION_DIAS || '0', 10);
+function purgarAntiguos() {
+  if (!RETENCION_DIAS) return;
+  try {
+    const corte = Math.floor(Date.now() / 1000) - RETENCION_DIAS * 86400;
+    const r = db.prepare('DELETE FROM messages WHERE ts < ?').run(corte);
+    if (r.changes > 0) {
+      db.prepare('DELETE FROM reactions WHERE ts < ?').run(corte);
+      console.log(`[db] Purgados ${r.changes} mensajes de más de ${RETENCION_DIAS} días.`);
+    }
+  } catch (e) {
+    console.error('[db] Purga:', e.message);
+  }
+}
+purgarAntiguos();
+setInterval(purgarAntiguos, 24 * 3600 * 1000);
+
+// Índice para las búsquedas y los recuentos por chat.
+try {
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_msg_busqueda ON messages (chat_id, from_me, ts)'
+  );
+} catch (_) {}
 
 const insertStmt = db.prepare(`
   INSERT OR IGNORE INTO messages
@@ -446,6 +506,7 @@ client.on('message_create', async (msg) => {
       // tener el historial completo) pero se excluyen de resúmenes,
       // estadísticas y GIF, porque son ruido generado por él mismo.
       from_me: msg.fromMe ? 1 : 0,
+      body_norm: util.norm(msg.body || ''),
     });
 
     // Log de descubrimiento: ayuda a encontrar el id del grupo y el tuyo.

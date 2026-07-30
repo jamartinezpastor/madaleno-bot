@@ -9,6 +9,7 @@ data/wweb-session/
 
 # ---- Datos del grupo (mensajes, reacciones) y datos personales ----
 data/*.db
+data/*.bak
 data/*.db-wal
 data/*.db-shm
 data/docs/*

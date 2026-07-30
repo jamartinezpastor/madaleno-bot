@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const csv = require('./csv');
 const groups = require('./groups');
+const util = require('./util');
 const gemini = require('./gemini');
 const ephemeris = require('./ephemeris');
 const gifmaker = require('./gifmaker');
@@ -53,7 +54,25 @@ function initSchema(_db) {
 // ---------- Conocimiento (CSV, por grupo) ----------
 // Lo aporta groups.js: datos comunes + los del CSV propio del grupo.
 function textoConocimiento(cfg) {
-  const datos = (cfg && cfg.datos) || [];
+  const datos = [...((cfg && cfg.datos) || [])];
+
+  // El calendario también es información consultable: sin esto, preguntar
+  // "¿cuándo es el cumple de María?" no encontraba nada aunque estuviera
+  // apuntado.
+  const MESES_N = ['enero','febrero','marzo','abril','mayo','junio','julio',
+    'agosto','septiembre','octubre','noviembre','diciembre'];
+  for (const e of (cfg && cfg.calendario) || []) {
+    const etiqueta =
+      e.clase === 'cumple'
+        ? 'Cumpleaños'
+        : e.clase === 'efemeride'
+          ? 'Efeméride'
+          : 'Evento';
+    const fecha = `${e.day} de ${MESES_N[e.month - 1]}${e.year ? ' de ' + e.year : ''}`;
+    const repite = e.repite === 'anual' ? ' (cada año)' : '';
+    datos.push(`${etiqueta}: ${e.texto} — ${fecha}${repite}`);
+  }
+
   if (datos.length === 0) return '';
   let txt = datos.map((d) => `- ${d}`).join('\n');
   if (txt.length > MAX_DOCS_CHARS) {
@@ -74,8 +93,9 @@ const TRIGGER_LIKE = BOT_TRIGGER.toLowerCase() + '%';
 const SIN_RUIDO = `AND from_me = 0 AND lower(trim(body)) NOT LIKE ?`;
 
 function recentMessages(db, chatId, limit = 50) {
-  return db
-    .prepare(
+  return util
+    .stmt(
+      db,
       `SELECT author_name, body, ts FROM messages
        WHERE chat_id = ? AND body != '' AND type = 'chat' ${SIN_RUIDO}
        ORDER BY ts DESC LIMIT ?`
@@ -85,8 +105,9 @@ function recentMessages(db, chatId, limit = 50) {
 }
 
 function messagesSince(db, chatId, since) {
-  return db
-    .prepare(
+  return util
+    .stmt(
+      db,
       `SELECT author_name, author_id, body, ts FROM messages
        WHERE chat_id = ? AND ts >= ? AND body != '' AND type = 'chat'
        ${SIN_RUIDO}
@@ -184,6 +205,33 @@ function computeStats(db, chatId) {
   };
 }
 
+/**
+ * Pie de transparencia: cómo está configurado esto, en una frase.
+ * Se genera de la configuración real, no de lo que suponga nadie.
+ */
+function lineaSeguridad() {
+  const partes = [];
+
+  partes.push(
+    process.env.DB_KEY
+      ? 'historial cifrado en el servidor (AES-256)'
+      : 'historial sin cifrar en el servidor'
+  );
+
+  const dias = parseInt(process.env.RETENCION_DIAS || '0', 10);
+  partes.push(dias > 0 ? `se conserva ${dias} días` : 'se conserva entero');
+
+  partes.push('comandos solo para administradores');
+
+  if (String(process.env.WEB_LINK_EN_GRUPO || '').toLowerCase() === 'true') {
+    partes.push('enlace de edición visible en el grupo');
+  }
+
+  partes.push(`los textos se analizan con ${gemini.MODEL}`);
+
+  return `_🔒 ${partes.join(' · ')}._`;
+}
+
 async function infoReport(db, chatId) {
   const s = computeStats(db, chatId);
   if (s.totalMsgs === 0) {
@@ -224,7 +272,7 @@ async function infoReport(db, chatId) {
     llmPart = '🗣️ Temas: (no disponible ahora mismo)';
   }
 
-  return lineas.join('\n') + '\n' + llmPart;
+  return lineas.join('\n') + '\n' + llmPart + '\n\n' + lineaSeguridad();
 }
 
 // ---------- Resumen 24h ----------
@@ -257,7 +305,7 @@ async function freeQuestion(db, chatId, question, cfg) {
       (t) => !PALABRAS_VACIAS.has(t)
     );
     if (terminos.length > 0) {
-      const hallados = puntuar(candidatos(db, chatId), terminos)
+      const hallados = puntuar(candidatos(db, chatId, terminos, 200), terminos)
         .sort((a, b) => b.aciertos - a.aciertos || b.ts - a.ts)
         .slice(0, 25)
         .sort((a, b) => a.ts - b.ts);
@@ -322,26 +370,11 @@ function checkRate(map, id, limit) {
   return true;
 }
 
-// Quita tildes para aceptar "efemerides" y "efemérides".
-function norm(s) {
-  return s
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
-}
+const norm = util.norm;
 
-// Compara identificadores de WhatsApp por su parte numérica: el mismo
-// contacto puede aparecer como "34699111222@c.us", "34699111222@lid" o
-// escrito con "+" y espacios en un CSV. Sin esto, un formato distinto
-// dejaría fuera a un admin legítimo.
-function soloDigitos(id) {
-  return String(id || '').split('@')[0].replace(/\D/g, '');
-}
 
 function esAutorizado(authorId, lista) {
-  const yo = soloDigitos(authorId);
-  if (!yo) return false;
-  return (lista || []).some((x) => soloDigitos(x) === yo);
+  return (lista || []).some((x) => util.mismoNumero(authorId, x));
 }
 
 // ---------- Buscador (@madaleno busca ...) ----------
@@ -394,14 +427,33 @@ function parseConsulta(entrada) {
   return { filtros, texto: palabras.join(' ').trim() };
 }
 
-function candidatos(db, chatId) {
-  return db
-    .prepare(
-      `SELECT author_name, body, ts FROM messages
+/**
+ * Mensajes candidatos para una búsqueda.
+ *
+ * El filtrado va DENTRO de SQLite usando body_norm (ya en minúsculas y sin
+ * tildes). Antes se traían decenas de miles de filas a memoria para
+ * normalizarlas en JavaScript: medido, era unas 350 veces más lento.
+ */
+function candidatos(db, chatId, terminos = null, limite = 400) {
+  if (!terminos || terminos.length === 0) {
+    return util
+      .stmt(
+        db,
+        `SELECT author_name, body, ts FROM messages
+          WHERE chat_id = ? AND body != '' AND type = 'chat' ${SIN_RUIDO}
+          ORDER BY ts DESC LIMIT ?`
+      )
+      .all(chatId, TRIGGER_LIKE, limite);
+  }
+
+  const condiciones = terminos.map(() => 'body_norm LIKE ?').join(' OR ');
+  const sql = `SELECT author_name, body, ts FROM messages
         WHERE chat_id = ? AND body != '' AND type = 'chat' ${SIN_RUIDO}
-        ORDER BY ts DESC LIMIT ?`
-    )
-    .all(chatId, TRIGGER_LIKE, BUSCA_MAX_ESCANEO);
+          AND (${condiciones})
+        ORDER BY ts DESC LIMIT ?`;
+  return util
+    .stmt(db, sql)
+    .all(chatId, TRIGGER_LIKE, ...terminos.map((t) => `%${t}%`), limite);
 }
 
 function filtrar(filas, filtros) {
@@ -465,7 +517,7 @@ async function informeBusqueda(db, chatId, entrada) {
   const { filtros, texto } = parseConsulta(entrada);
   const terminos = terminosDe(texto);
 
-  let filas = filtrar(candidatos(db, chatId), filtros);
+  let filas = filtrar(candidatos(db, chatId, terminos.length ? terminos : null), filtros);
 
   // Solo filtros, sin texto: p.ej. "busca enlaces de:Ana"
   if (terminos.length === 0) {
@@ -504,7 +556,10 @@ async function informeBusqueda(db, chatId, entrada) {
       { temperature: 0.4, maxTokens: 120 }
     );
     const alternativos = terminosDe(sinonimos.replace(/,/g, ' '));
-    const porAproximacion = puntuar(filas, alternativos);
+    const porAproximacion = puntuar(
+      filtrar(candidatos(db, chatId, alternativos), filtros),
+      alternativos
+    );
     porAproximacion.sort((a, b) => b.aciertos - a.aciertos || b.ts - a.ts);
 
     if (porAproximacion.length > 0) {
@@ -547,7 +602,8 @@ async function handleIncoming(
 
   // ---- Comandos abiertos a cualquier miembro del grupo ----
   // Son gratis (no usan IA) y de solo lectura.
-  const esPublico = /^(eventos|ayuda|help|comandos|\?)/.test(lower) || !rest;
+  const esPublico =
+    /^(eventos|efemerid|efemer|ayuda|help|comandos|\?)/.test(lower) || !rest;
 
   // Quién manda aquí: los administradores del grupo en WhatsApp.
   let autorizados = null;
@@ -575,6 +631,7 @@ async function handleIncoming(
   const AYUDA_TODOS =
     '🤖 *Madaleno*\n' +
     '• `eventos` — próximos 30 días del calendario\n' +
+    '• `efemérides` — qué pasó un día como hoy\n' +
     '• `ayuda` — esta lista\n' +
     `_Por privado puedes pedirme ${BOT_TRIGGER} miresumen: solo lo que te afecta._`;
 
@@ -587,7 +644,6 @@ async function handleIncoming(
     '• `busca <palabras>` — encuentra mensajes antiguos\n' +
     '• `calendario` — enlace privado para editar el calendario\n' +
     '• `añade 3/10 Cena` — apunta un evento (`borra 2` lo quita)\n' +
-    '• `efemérides` — qué pasó un día como hoy\n' +
     '• `<pregunta>` — respondo con mis datos y el historial';
 
   const AYUDA = esAdmin ? `${AYUDA_TODOS}\n\n${AYUDA_ADMIN}` : AYUDA_TODOS;

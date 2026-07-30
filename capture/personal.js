@@ -20,6 +20,7 @@
  */
 
 const gemini = require('./gemini');
+const util = require('./util');
 
 const TRIGGER = (process.env.BOT_TRIGGER || '@madaleno').toLowerCase();
 const RATE_PER_HOUR = parseInt(process.env.QA_RATE_PER_HOUR || '20', 10);
@@ -33,27 +34,14 @@ function initSchema(db) {
   `);
 }
 
-function norm(s) {
-  return String(s || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim()
-    .toLowerCase();
-}
+const norm = util.norm;
 
-function soloDigitos(id) {
-  return String(id || '').split('@')[0].replace(/\D/g, '');
-}
+const soloDigitos = util.soloDigitos;
 
-// --- Límite anti-abuso ---
-const rateMap = new Map();
+// --- Límite anti-abuso (con purga automática) ---
+const limitar = util.crearLimitador(RATE_PER_HOUR);
 function checkRate(userId) {
-  const now = Date.now();
-  const arr = (rateMap.get(userId) || []).filter((t) => t > now - 3600_000);
-  if (arr.length >= RATE_PER_HOUR) return false;
-  arr.push(now);
-  rateMap.set(userId, arr);
-  return true;
+  return limitar(userId);
 }
 
 // --- Enlaces "pulsa y envía" ---

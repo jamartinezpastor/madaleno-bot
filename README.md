@@ -44,17 +44,17 @@ En el grupo, escribiendo `@madaleno <comando>`:
 
 | Comando | Quién | Qué hace |
 |---|---|---|
-| `eventos` | todos | Calendario de los próximos 30 días |
+| `eventos` | todos | Qué viene: próximos 30 días |
+| `efemérides` | todos | Qué pasó un día como hoy |
 | `ayuda` | todos | Lista de comandos |
 | `resumen` | admins | Las últimas 24 h en 2 líneas |
-| `info` | admins | Estadísticas del grupo |
+| `info` | admins | Estadísticas del grupo + cómo está configurado |
 | `gif` | admins | Animación con humor de lo que se habla |
 | `orla` | admins | Orla con las fotos del grupo |
 | `busca <texto>` | admins | Busca en todo el historial |
-| `efemérides` | admins | Qué pasó un día como hoy |
 | `calendario` | admins | Enlace privado para editar el calendario |
 | `añade 3/10 Cena` | admins | Apunta un evento (`borra 2` lo quita) |
-| `<pregunta>` | admins | Responde con tus datos y el historial |
+| `<pregunta>` | admins | Responde con tus datos, el calendario y el historial |
 
 Por privado, cualquier miembro:
 
@@ -91,6 +91,10 @@ nombre,,,,34699111222 | María García
 - `aviso`: `si` para que el bot lo anuncie en el grupo ese día.
 
 Los CSV se releen al cambiar; no hay que reiniciar.
+
+Todo lo del calendario es consultable: sale en `eventos` (lo que viene),
+en `efemérides` (lo de un día como hoy) y en las preguntas libres
+("¿cuándo es el cumple de María?").
 
 ## Calendario
 
@@ -143,12 +147,27 @@ A partir de `BIRTHDAY_HOUR` (11:30), el bot anuncia en cada grupo los
 ## Dónde se guarda todo
 
 SQLite en `/data/messages.db` (mensajes, reacciones, avisos enviados) y los
-CSV en `/data/docs/`. **No está cifrado**: quien acceda al servidor lee el
-historial completo. Ahí vive también la sesión de WhatsApp.
+CSV en `/data/docs/`. Ahí vive también la sesión de WhatsApp.
+
+### Cifrado (opcional)
+
+Con `DB_KEY` en el `.env`, la base se guarda cifrada con AES-256. Si ya
+existía en claro, se migra sola al arrancar y deja una copia
+`messages.db.enclaro.bak` que debes borrar tú tras comprobar que va bien.
 
 ```bash
-docker exec -it madaleno-bot node -e "const d=require('better-sqlite3')('/data/messages.db');console.log(d.prepare('SELECT COUNT(*) n FROM messages').get())"
+openssl rand -hex 32     # genera la clave
 ```
+
+Qué protege y qué no:
+
+- ✅ Copias de seguridad, discos o volúmenes robados: sin la clave son ruido.
+- ❌ Alguien con acceso al servidor: la clave está en el entorno del
+  contenedor, a su alcance.
+
+**Si pierdes `DB_KEY` pierdes el historial.** Guárdala fuera del servidor.
+La sesión de WhatsApp (`/data/wweb-session`) no se cifra: protégela con
+permisos del sistema.
 
 ## Coste
 

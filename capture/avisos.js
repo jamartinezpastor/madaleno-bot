@@ -12,6 +12,7 @@
  */
 
 const gemini = require('./gemini');
+const util = require('./util');
 
 const HOUR_STR = process.env.BIRTHDAY_HOUR || '11:30';
 const CHECK_MODE = (process.env.BIRTHDAY_CHECK_GREET || 'siempre').toLowerCase();
@@ -51,8 +52,9 @@ function esHora() {
 function mensajesDeHoy(db, chatId) {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
-  return db
-    .prepare(
+  return util
+    .stmt(
+      db,
       `SELECT body FROM messages
        WHERE chat_id = ? AND ts >= ? AND body != '' AND type = 'chat'
          AND from_me = 0

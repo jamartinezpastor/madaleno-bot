@@ -14,6 +14,7 @@
 
 const express = require('express');
 const tokens = require('./token');
+const util = require('./util');
 const groups = require('./groups');
 const calendario = require('./calendario');
 
@@ -71,6 +72,8 @@ function pagina({ titulo, cuerpo, aviso }) {
     padding:13px;font-weight:600;font-size:16px}
   .pie{color:var(--suave);font-size:12.5px;margin-top:20px;text-align:center}
   .vacio{color:var(--suave);font-style:italic;padding:6px 0 16px}
+  details{margin:0 0 20px}
+  summary{cursor:pointer;color:var(--suave);font-size:14px;padding:6px 0}
 </style></head><body><div class="caja">
 ${aviso ? `<div class="aviso${aviso.err ? ' err' : ''}">${esc(aviso.texto)}</div>` : ''}
 ${cuerpo}
@@ -107,6 +110,28 @@ function vistaCalendario({ nombreGrupo, cfg, token, aviso, caduca }) {
     })
     .join('');
 
+  // Sección de pasados: solo aquí, para poder limpiarlos.
+  const viejos = calendario.pasados(cfg);
+  const itemsViejos = viejos
+    .map((e) => {
+      const f = `${String(e.day).padStart(2, '0')}/${String(e.month).padStart(2, '0')}/${e.year}`;
+      const firma = [e.clase, e.day, e.month, e.texto].join('|');
+      return `<li>
+        <span class="cuando">${esc(f)}</span>
+        <span class="qué">${ICONO[e.clase] || '•'} ${esc(e.texto)}</span>
+        <form method="post" action="/c/${encodeURIComponent(token)}/del">
+          <input type="hidden" name="firma" value="${esc(firma)}">
+          <button class="borrar" type="submit">Borrar</button>
+        </form>
+      </li>`;
+    })
+    .join('');
+
+  const bloqueViejos = viejos.length
+    ? `<details><summary>Ya pasaron (${viejos.length})</summary>
+       <ul style="margin-top:10px">${itemsViejos}</ul></details>`
+    : '';
+
   const opcionesMes = MESES.map(
     (m, i) => `<option value="${i + 1}">${m}</option>`
   ).join('');
@@ -115,7 +140,8 @@ function vistaCalendario({ nombreGrupo, cfg, token, aviso, caduca }) {
   <h1>🗓️ ${esc(nombreGrupo)}</h1>
   <div class="sub">Calendario del grupo · ${lista.length} entrada${lista.length === 1 ? '' : 's'}</div>
 
-  ${items ? `<ul>${items}</ul>` : '<div class="vacio">Todavía no hay nada apuntado.</div>'}
+  ${items ? `<ul>${items}</ul>` : '<div class="vacio">Nada próximo apuntado.</div>'}
+  ${bloqueViejos}
 
   <form class="alta" method="post" action="/c/${encodeURIComponent(token)}/add">
     <strong>Añadir</strong>
@@ -175,7 +201,20 @@ function paginaError(texto) {
 function arrancar({ db, docsDir, secreto, nombreDeGrupo, puerto, onCambio }) {
   const app = express();
   app.disable('x-powered-by');
+  app.set('trust proxy', 1); // detrás de un proxy inverso con HTTPS
   app.use(express.urlencoded({ extended: false, limit: '32kb' }));
+
+  // Tope de peticiones por IP: la web es pública y conviene no dejarla
+  // expuesta a que alguien la martillee.
+  const limitarIp = util.crearLimitador(300);
+  app.use((req, res, next) => {
+    const ip = req.ip || 'desconocida';
+    if (!limitarIp(ip)) {
+      res.status(429).send('Demasiadas peticiones. Espera un momento.');
+      return;
+    }
+    next();
+  });
 
   // Toda ruta pasa por aquí: sin token válido no hay nada que ver.
   function auth(req, res, next) {

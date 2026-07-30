@@ -23,6 +23,7 @@
 const fs = require('fs');
 const path = require('path');
 const csv = require('./csv');
+const util = require('./util');
 
 const CABECERA = 'tipo,dia,mes,anio,texto,repite,aviso';
 const MESES = [
@@ -30,13 +31,7 @@ const MESES = [
   'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
 ];
 
-function norm(s) {
-  return String(s || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim()
-    .toLowerCase();
-}
+const norm = util.norm;
 
 // --- Fichero del grupo ---
 function ficheroDe(docsDir, chatId) {
@@ -279,11 +274,31 @@ function diasHasta(evento, desde = new Date()) {
 const ICONO = { cumple: '🎂', evento: '📅', efemeride: '📜' };
 
 /** Próximos eventos ordenados por cercanía. */
-function proximos(cfg, dias = 60) {
+function proximos(cfg, dias = 60, opciones = {}) {
+  // Las efemérides quedan fuera por defecto: son aniversarios históricos,
+  // no cosas que vayan a pasar. Se consultan con `efemérides`.
+  const incluirEfemerides = opciones.incluirEfemerides === true;
   return (cfg.calendario || [])
+    .filter((e) => incluirEfemerides || e.clase !== 'efemeride')
     .map((e) => ({ ...e, en: diasHasta(e) }))
     .filter((e) => e.en !== null && e.en <= dias)
     .sort((a, b) => a.en - b.en);
+}
+
+/**
+ * Eventos de una sola vez que ya pasaron.
+ * No salen en `eventos` (nadie quiere ver planes caducados), pero sí en la
+ * web: si no, quedarían atrapados en el CSV sin forma de borrarlos.
+ */
+function pasados(cfg, limite = 25) {
+  const hoy = new Date();
+  const corte = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate());
+  return (cfg.calendario || [])
+    .filter((e) => e.repite === 'unavez' && e.year)
+    .map((e) => ({ ...e, fecha: new Date(e.year, e.month - 1, e.day) }))
+    .filter((e) => e.fecha < corte)
+    .sort((a, b) => b.fecha - a.fecha)
+    .slice(0, limite);
 }
 
 function cuando(e) {
@@ -322,4 +337,6 @@ function informe(cfg, dias = 60, opciones = {}) {
   );
 }
 
-module.exports = { informe, proximos, añadir, borrar, parseAlta, diasHasta };
+module.exports = {
+  informe, proximos, pasados, añadir, borrar, parseAlta, diasHasta,
+};

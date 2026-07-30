@@ -29,16 +29,11 @@
 const fs = require('fs');
 const path = require('path');
 const csv = require('./csv');
+const util = require('./util');
 
 let cache = { mtimeSum: -1, ficheros: [] };
 
-function normaliza(s) {
-  return String(s || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim()
-    .toLowerCase();
-}
+const normaliza = util.norm;
 
 function esIdGrupo(s) {
   return /@g\.us\s*$/.test(String(s || ''));
