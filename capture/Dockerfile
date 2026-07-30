@@ -1,7 +1,25 @@
-# whatsapp-web.js usa Puppeteer -> necesita Chromium y sus librerías.
+# ---------- Fase 1: dependencias ----------
+# Los módulos nativos (SQLite con cifrado) no siempre tienen binario
+# precompilado para cada versión de Node, así que aquí se compila si hace
+# falta. Los compiladores se quedan en esta fase: no van a la imagen final.
+FROM node:20-bookworm-slim AS deps
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 \
+      make \
+      g++ \
+      ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+WORKDIR /app
+COPY package.json ./
+RUN npm install --omit=dev --no-audit --no-fund
+
+# ---------- Fase 2: imagen final ----------
 FROM node:20-bookworm-slim
 
-# Dependencias de Chromium
+# Chromium (para WhatsApp Web, el GIF y la orla), ffmpeg y emojis a color
 RUN apt-get update && apt-get install -y --no-install-recommends \
       chromium \
       ffmpeg \
@@ -32,17 +50,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxkbcommon0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Que Puppeteer use el Chromium del sistema (no descargue otro)
+ENV NODE_ENV=production
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
-ENV NODE_ENV=production
-
 WORKDIR /app
-COPY package.json ./
-# --omit=dev y sin scripts opcionales: imagen más pequeña y arranque limpio
-RUN npm install --omit=dev --no-audit --no-fund && npm cache clean --force
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-EXPOSE 3000
+EXPOSE 3000 3001
 CMD ["node", "index.js"]
