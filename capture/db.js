@@ -94,17 +94,43 @@ function abrir(ruta) {
     return db; // nueva, o ya cifrada con esta clave
   }
 
-  // Existe pero no se abre con la clave: o está en claro (migramos), o la
-  // clave es otra (no se toca nada).
+  // Existe pero no se abre con la clave. Tres posibilidades:
+  // en claro (migramos), cifrada con la clave anterior (rotamos), o
+  // clave equivocada (no se toca nada).
   db.close();
+
+  const anterior = (process.env.DB_KEY_ANTERIOR || '').trim();
+  if (anterior) {
+    const conAnterior = new Database(ruta);
+    configurarCifrado(conAnterior, anterior);
+    if (seLee(conAnterior)) {
+      console.log('[db] Rotando la clave de cifrado...');
+      fs.copyFileSync(ruta, `${ruta}.antesderotar.bak`);
+      conAnterior.pragma('journal_mode = DELETE');
+      conAnterior.pragma(`rekey = '${escapar(clave)}'`);
+      conAnterior.close();
+
+      const nueva = new Database(ruta);
+      configurarCifrado(nueva, clave);
+      if (!seLee(nueva)) {
+        nueva.close();
+        throw new Error('La rotación de clave no se pudo verificar');
+      }
+      console.log('[db] Clave rotada. Quita ya DB_KEY_ANTERIOR del entorno');
+      console.log('[db] y borra el fichero .antesderotar.bak.');
+      return nueva;
+    }
+    conAnterior.close();
+  }
+
   const enClaro = new Database(ruta);
   const legible = seLee(enClaro);
   enClaro.close();
 
   if (!legible) {
     throw new Error(
-      'DB_KEY no abre la base de datos. ¿Has cambiado la clave? ' +
-        'Restaura la copia o vuelve a poner la clave anterior.'
+      'DB_KEY no abre la base de datos. Si has cambiado la clave, pon la ' +
+        'anterior en DB_KEY_ANTERIOR y arranca: se rotará sola.'
     );
   }
 

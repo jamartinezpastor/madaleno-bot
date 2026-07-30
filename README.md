@@ -15,7 +15,8 @@ Los miembros del grupo deberían saberlo.
 
 ## Requisitos
 
-- Docker y Docker Compose.
+- Docker y Docker Compose. La imagen se construye en dos fases: los
+  compiladores del módulo de cifrado se quedan fuera de la imagen final.
 - Una API key de Gemini: https://aistudio.google.com/apikey
 - ~1 GB de RAM libre.
 
@@ -205,6 +206,10 @@ Qué protege y qué no:
 - ✅ Copias de seguridad, discos o volúmenes robados: sin la clave son ruido.
 - ❌ Alguien con acceso al servidor: la clave está en el entorno del
   contenedor, a su alcance.
+
+Para **cambiar la clave**: pon la anterior en `DB_KEY_ANTERIOR`, la nueva
+en `DB_KEY` y arranca. Se rota sola y deja copia; después quita
+`DB_KEY_ANTERIOR`.
 
 **Si pierdes `DB_KEY` pierdes el historial.** Guárdala fuera del servidor.
 La sesión de WhatsApp (`/data/wweb-session`) no se cifra: protégela con

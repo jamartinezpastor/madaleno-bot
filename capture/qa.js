@@ -39,12 +39,6 @@ const LINK_EN_GRUPO =
 const LINK_GRUPO_HORAS = parseInt(process.env.WEB_LINK_GRUPO_HORAS || '2', 10);
 const GIF_RATE_PER_HOUR = parseInt(process.env.GIF_RATE_PER_HOUR || '5', 10);
 
-// CSV reservados: no forman parte del "conocimiento" para preguntas.
-const RESERVED = new Set([
-  (process.env.BIRTHDAY_CSV || 'cumples.csv').toLowerCase(),
-  (process.env.EPHEMERIS_CSV || 'efemerides.csv').toLowerCase(),
-]);
-
 // Tope defensivo de contexto cargado desde los CSV de conocimiento.
 const MAX_DOCS_CHARS = 200_000;
 
