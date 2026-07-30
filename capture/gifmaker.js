@@ -28,46 +28,50 @@ const W = parseInt(process.env.GIF_WIDTH || '480', 10);
 const H = parseInt(process.env.GIF_HEIGHT || '480', 10);
 const FRAME_MS = parseInt(process.env.GIF_FRAME_MS || '1700', 10);
 
-// Paleta de fondos para ir alternando entre escenas.
+// Paleta de fondos para ir alternando entre escenas. El tercer color es
+// el de la barra superior de acento, para que llame más la atención.
 const BGS = [
-  ['#1d3557', '#457b9d'],
-  ['#2d3142', '#4f5d75'],
-  ['#40323e', '#7d5a5a'],
-  ['#22333b', '#5e807f'],
-  ['#3d348b', '#7678ed'],
+  ['#1d3557', '#457b9d', '#ffd400'],
+  ['#2d3142', '#4f5d75', '#ef8354'],
+  ['#40323e', '#7d5a5a', '#f4d35e'],
+  ['#22333b', '#5e807f', '#e63946'],
+  ['#3d348b', '#7678ed', '#f7b32b'],
 ];
 
 /** Pide a Gemini el guion del GIF. */
 async function guion(transcripcion) {
-  const system = `Eres un guionista con humor ácido e ironía fina (nunca
-insultos, nada ofensivo ni personal). Te dan la conversación reciente de un
-grupo de WhatsApp y escribes una MICROHISTORIA de tres actos sobre lo que
-ha pasado en el grupo, para animarla en un GIF.
+  const system = `Eres un guionista de titulares con humor ácido, sarcasmo
+e ironía afilada (nunca insultos, nada ofensivo ni personal contra nadie
+en concreto). Te dan la conversación reciente de un grupo de WhatsApp y
+escribes el guion de un GIF que tiene que ENGANCHAR nada más verse: cero
+paja, directo al golpe, como un titular sensacionalista.
 
-Estructura: acto 1 planteamiento, acto 2 desarrollo (la cosa se tuerce o se
-va de madre), acto 3 desenlace irónico. Que se lea como una historia, con
-continuidad entre actos, no como tres temas sueltos.
+Decide TÚ cuántas escenas hacen falta, de 1 a 3, según dé de sí la
+conversación:
+- Si ha pasado UNA cosa clara y jugosa: UNA sola escena, la más incisiva
+  posible, y ya. Menos es más.
+- Si hay varios momentos con hilo entre ellos: hasta 3, con continuidad
+  de historia (planteamiento → se tuerce → remate), nunca temas sueltos.
 
-MUY IMPORTANTE: poquísimo texto, se lee en 1,5 segundos.
-- "titulo": máximo 2 palabras (idealmente 1).
-- "texto": máximo 28 caracteres. Un golpe seco, sin explicar nada.
+MUY IMPORTANTE: poquísimo texto, se lee en menos de 1 segundo por escena.
+- "titulo": máximo 2 palabras (idealmente 1), tipo titular de prensa.
+- "texto": máximo 26 caracteres. Un golpe seco y afilado, cero explicación.
 - Prohibido: frases subordinadas, comas de más, "porque", "aunque".
-- "frase" final: máximo 50 caracteres, es la moraleja/remate.
+- "frase" final: máximo 50 caracteres. El remate, lo más lapidario posible.
 
 Devuelve SOLO JSON con esta forma exacta:
 {
-  "frase": "remate irónico final",
+  "frase": "remate lapidario final",
   "escenas": [
-    {"titulo": "1-2 palabras", "texto": "máx 28 caracteres", "emoji": "un emoji"},
-    {"titulo": "1-2 palabras", "texto": "máx 28 caracteres", "emoji": "un emoji"},
-    {"titulo": "1-2 palabras", "texto": "máx 28 caracteres", "emoji": "un emoji"}
+    {"titulo": "1-2 palabras", "texto": "máx 26 caracteres", "emoji": "un emoji muy expresivo"}
   ]
 }
-Exactamente 3 escenas. En español. Básate solo en lo que veas en la
-conversación; si el grupo habló poco, la historia va precisamente de eso.`;
+Entre 1 y 3 escenas (tú decides cuántas, prioriza pocas y contundentes).
+En español. Básate solo en lo que veas en la conversación; si el grupo
+habló poco, el chiste va precisamente sobre eso, con más mordiente aún.`;
 
   return gemini.generateJson(system, transcripcion, {
-    temperature: 0.9,
+    temperature: 0.95,
     maxTokens: 500,
   });
 }
@@ -83,22 +87,27 @@ function recortar(s, max) {
 
 /** HTML de una tarjeta. progreso 0..1 anima escala y aparición. */
 function tarjetaHtml({ titulo, texto, emoji }, bg, progreso) {
-  const scale = 0.94 + 0.06 * progreso;
+  const scale = 0.92 + 0.08 * progreso;
   const op = Math.min(1, 0.35 + progreso * 1.2);
-  const dy = (1 - progreso) * 14;
+  const dy = (1 - progreso) * 16;
   return `<!doctype html><html><head><meta charset="utf-8"><style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{width:${W}px;height:${H}px;overflow:hidden;
     font-family:"Noto Color Emoji","DejaVu Sans",system-ui,sans-serif;
     background:linear-gradient(135deg,${bg[0]},${bg[1]});
-    display:flex;align-items:center;justify-content:center}
-  .card{width:86%;text-align:center;color:#fff;
+    display:flex;align-items:center;justify-content:center;position:relative}
+  .barra{position:absolute;top:0;left:0;right:0;height:10px;
+    background:${bg[2] || '#ffd400'}}
+  .card{width:90%;text-align:center;color:#fff;
     transform:scale(${scale}) translateY(${dy}px);opacity:${op}}
-  .emoji{font-size:120px;line-height:1.1;margin-bottom:18px}
-  .titulo{font-size:46px;font-weight:800;line-height:1.15;
-    text-shadow:0 3px 10px rgba(0,0,0,.35);margin-bottom:14px}
-  .texto{font-size:30px;font-weight:500;opacity:.95;line-height:1.35}
+  .emoji{font-size:190px;line-height:1;margin-bottom:14px;
+    filter:drop-shadow(0 6px 14px rgba(0,0,0,.4))}
+  .titulo{font-size:66px;font-weight:900;line-height:1.05;
+    text-transform:uppercase;letter-spacing:.5px;
+    text-shadow:0 4px 12px rgba(0,0,0,.4);margin-bottom:16px}
+  .texto{font-size:38px;font-weight:700;opacity:.97;line-height:1.25}
   </style></head><body>
+  <div class="barra"></div>
   <div class="card">
     <div class="emoji">${emoji || '💬'}</div>
     <div class="titulo">${esc(titulo || '')}</div>
@@ -162,7 +171,7 @@ function gifToMp4(gifPath) {
  */
 async function crearGif(getBrowser, transcripcion) {
   const g = await guion(transcripcion);
-  const escenas = Array.isArray(g.escenas) ? g.escenas.slice(0, 4) : [];
+  const escenas = Array.isArray(g.escenas) ? g.escenas.slice(0, 3) : [];
   if (escenas.length === 0) throw new Error('Gemini no devolvió escenas');
 
   const browser = getBrowser();
@@ -173,24 +182,29 @@ async function crearGif(getBrowser, transcripcion) {
   try {
     await page.setViewport({ width: W, height: H, deviceScaleFactor: 1 });
 
-    // Historia: portada breve + 3 actos + remate final.
+    // Con una sola escena, sin gancho previo: directos al golpe, sin
+    // paja. Con 2-3, un gancho brevísimo antes de arrancar la historia.
     const cards = [
-      {
-        titulo: 'Madaleno',
-        texto: 'Érase una vez este grupo…',
-        emoji: '🎬',
-        ms: 1100,
-      },
+      ...(escenas.length > 1
+        ? [
+            {
+              titulo: 'Madaleno',
+              texto: 'Esto se cuece aquí…',
+              emoji: '🚨',
+              ms: 900,
+            },
+          ]
+        : []),
       ...escenas.map((e) => ({
         titulo: recortar(e.titulo, 18),
-        texto: recortar(e.texto, 30),
+        texto: recortar(e.texto, 28),
         emoji: e.emoji || '💬',
         ms: FRAME_MS,
       })),
       {
-        titulo: 'Moraleja',
+        titulo: 'Remate',
         texto: recortar(g.frase, 52),
-        emoji: '🎭',
+        emoji: '🎯',
         // El remate necesita bastante más tiempo: es lo único que hay que
         // leer entero y, en bucle, lo último antes de volver a empezar.
         ms: 4200,

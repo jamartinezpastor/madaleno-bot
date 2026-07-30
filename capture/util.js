@@ -77,4 +77,18 @@ function stmt(db, sql) {
   return s;
 }
 
-module.exports = { norm, soloDigitos, mismoNumero, crearLimitador, stmt };
+/**
+ * Fragmento SQL para quedarnos con mensajes que tienen contenido real.
+ *
+ * Antes se exigía `type = 'chat'`, lo que descartaba fotos, vídeos y
+ * documentos enviados CON PIE DE FOTO: WhatsApp les pone un tipo distinto
+ * de 'chat' aunque tengan texto. Eso hacía que buscar o preguntar por
+ * algo mencionado en un pie de foto no encontrara nada. Se excluye solo
+ * lo que nunca es contenido de una persona (notificaciones de sistema,
+ * mensajes borrados, llamadas).
+ */
+const SQL_CON_CONTENIDO =
+  "type NOT IN ('e2e_notification','notification_template','notification'," +
+  "'call_log','gp2','revoked','ciphertext')";
+
+module.exports = { norm, soloDigitos, mismoNumero, crearLimitador, stmt, SQL_CON_CONTENIDO };

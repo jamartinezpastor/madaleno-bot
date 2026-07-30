@@ -261,12 +261,19 @@ function mensajesPorAutor(chatId) {
 }
 
 async function datosOrla(chatId, sobrescrituras = {}) {
-  const chat = await client.getChatById(chatId);
-  if (!chat || !chat.isGroup) throw new Error('Esto no es un grupo');
+  // El nombre del grupo y sus participantes se leen del store (grupoPorStore),
+  // no de getChatById: es la misma llamada rota que bloqueaba a los admins,
+  // y aquí impedía que la orla funcionase en absoluto.
+  const g = await grupoPorStore(chatId);
+  if (!g || !Array.isArray(g.participantes) || g.participantes.length === 0) {
+    throw new Error(
+      'No consigo leer los miembros del grupo ahora mismo (fallo de WhatsApp Web).'
+    );
+  }
 
   const yo = client.info && client.info.wid && client.info.wid._serialized;
-  let participantes = (chat.participants || []).filter(
-    (p) => p.id && p.id._serialized !== yo // el bot no sale en su propia orla
+  let participantes = g.participantes.filter(
+    (p) => p.id && p.id !== yo // el bot no sale en su propia orla
   );
 
   // En grupos muy grandes, los más participativos.
@@ -274,17 +281,14 @@ async function datosOrla(chatId, sobrescrituras = {}) {
   if (participantes.length > MAX_ORLA) {
     const cuenta = mensajesPorAutor(chatId);
     participantes = participantes
-      .sort(
-        (a, b) =>
-          (cuenta.get(b.id._serialized) || 0) - (cuenta.get(a.id._serialized) || 0)
-      )
+      .sort((a, b) => (cuenta.get(b.id) || 0) - (cuenta.get(a.id) || 0))
       .slice(0, MAX_ORLA);
     recortado = true;
   }
 
   const miembros = [];
   for (const p of participantes) {
-    const id = p.id._serialized;
+    const id = p.id;
     const digitos = id.split('@')[0];
 
     // Nombre, por orden de preferencia:
@@ -330,11 +334,11 @@ async function datosOrla(chatId, sobrescrituras = {}) {
   });
 
   return {
-    titulo: chat.name || 'Nuestro grupo',
+    titulo: g.subject || nombresChat.get(chatId) || 'Nuestro grupo',
     subtitulo: recortado
       ? `Los ${miembros.length} miembros más activos`
       : `${miembros.length} miembros`,
-    pie: `${hoy}${recortado ? '' : ''}`,
+    pie: hoy,
     fotoGrupo,
     miembros,
   };
@@ -350,25 +354,66 @@ async function gruposVigilados() {
   if (cacheChats.lista && Date.now() - cacheChats.ts < CHATS_TTL_MS) {
     return cacheChats.lista;
   }
-  const todos = await client.getChats();
-  const lista = todos
-    .filter((c) => c.isGroup)
-    .filter((c) => GROUP_IDS.length === 0 || GROUP_IDS.includes(c.id._serialized));
+  // No depende de client.getChats() (el mismo bug de "Puppeteer error r: r"
+  // que afecta a getChatById): los ids de grupo salen de nuestra propia
+  // base de datos, que ya los conoce por haber capturado sus mensajes.
+  let ids = [];
+  try {
+    ids = db
+      .prepare("SELECT DISTINCT chat_id FROM messages WHERE chat_id LIKE '%@g.us'")
+      .all()
+      .map((r) => r.chat_id);
+  } catch (e) {
+    console.error('[grupos] No pude listar grupos de la BD:', e.message);
+  }
+  if (GROUP_IDS.length > 0) {
+    // Incluye los configurados aunque aún no tengan mensajes capturados
+    // (grupo recién añadido) y descarta cualquier otro.
+    for (const g of GROUP_IDS) if (!ids.includes(g)) ids.push(g);
+    ids = ids.filter((id) => GROUP_IDS.includes(id));
+  }
+  const lista = ids.map((id) => ({ id, nombre: nombresChat.get(id) || null }));
   cacheChats = { lista, ts: Date.now() };
   return lista;
 }
 
+function haEscritoAlgunaVez(chatId, digitos) {
+  try {
+    return db
+      .prepare('SELECT DISTINCT author_id FROM messages WHERE chat_id = ?')
+      .all(chatId)
+      .some((f) => util.soloDigitos(f.author_id) === digitos);
+  } catch (_) {
+    return false;
+  }
+}
+
 async function gruposDelUsuario(userId) {
-  const digitos = String(userId).split('@')[0].replace(/\D/g, '');
+  const digitos = util.soloDigitos(userId);
   const salida = [];
   for (const chat of await gruposVigilados()) {
-    const dentro = (chat.participants || []).some(
-      (p) =>
-        p.id &&
-        String(p.id._serialized).split('@')[0].replace(/\D/g, '') === digitos
-    );
-    if (dentro) {
-      salida.push({ id: chat.id._serialized, nombre: chat.name || 'Grupo' });
+    let esMiembro = false;
+    let subject = chat.nombre;
+
+    // 1) Comprobación en vivo vía store: la fuente más fiable si funciona.
+    try {
+      const g = await grupoPorStore(chat.id);
+      if (g) {
+        esMiembro = g.participantes.some(
+          (p) => util.soloDigitos(p.id) === digitos
+        );
+        subject = subject || g.subject;
+      }
+    } catch (_) {}
+
+    // 2) Respaldo: si el store falla pero esta persona ha escrito alguna
+    //    vez en este chat según nuestra base de datos, se le trata como
+    //    miembro. Mejor un falso positivo ocasional (alguien que se fue
+    //    del grupo) que dejar el resumen personal completamente inoperativo.
+    if (!esMiembro) esMiembro = haEscritoAlgunaVez(chat.id, digitos);
+
+    if (esMiembro) {
+      salida.push({ id: chat.id, nombre: subject || 'Grupo' });
     }
   }
   return salida;
@@ -407,15 +452,13 @@ const ADMIN_TTL_MS = 10 * 60 * 1000;
 // reproducido incluso en la última versión estable). Mientras dure,
 // ADMIN_FALLBACK_IDS permite seguir operando sin depender de esa llamada.
 /**
- * Lee los administradores directamente del almacén interno de WhatsApp Web.
- *
- * getChatById falla ("Puppeteer error r: r") porque hace mucho más de lo
- * necesario: serializa modelos, resuelve LIDs, distingue canales... y algo
- * de eso se rompe con cada cambio de WhatsApp Web. Aquí solo se pide una
- * cosa concreta, y cualquier error se devuelve como texto en vez de
- * propagarse, así que no puede tumbar nada.
+ * Lee del almacén interno de WhatsApp Web todo lo que antes se pedía con
+ * getChatById: participantes (con su condición de admin), nombre del
+ * grupo y quién es cada uno. Una sola llamada evaluate(), reutilizada por
+ * adminsDelGrupo, datosOrla y gruposDelUsuario: los tres dejaron de
+ * depender de getChatById/getChats, que es lo que falla.
  */
-async function adminsPorStore(chatId) {
+async function grupoPorStore(chatId) {
   if (!client.pupPage) return null;
 
   const res = await client.pupPage
@@ -431,25 +474,32 @@ async function adminsPorStore(chatId) {
         const p = meta && meta.participants;
         if (!p) return { error: 'sin participantes' };
 
-        // La colección puede venir de varias formas según la versión.
         const lista = p.getModelsArray
           ? p.getModelsArray()
           : Array.isArray(p)
             ? p
             : p._models || [];
 
-        const admins = lista
-          .filter((x) => x && (x.isAdmin || x.isSuperAdmin))
-          .map((x) => {
-            const i = x.id;
-            if (!i) return null;
-            if (typeof i === 'string') return i;
-            if (i._serialized) return i._serialized;
-            return i.user ? `${i.user}@${i.server || 'c.us'}` : null;
-          })
-          .filter(Boolean);
+        const idDe = (i) => {
+          if (!i) return null;
+          if (typeof i === 'string') return i;
+          if (i._serialized) return i._serialized;
+          return i.user ? `${i.user}@${i.server || 'c.us'}` : null;
+        };
 
-        return { admins, total: lista.length };
+        const participantes = lista
+          .map((x) => ({
+            id: idDe(x && x.id),
+            isAdmin: !!(x && (x.isAdmin || x.isSuperAdmin)),
+          }))
+          .filter((x) => x.id);
+
+        const subject =
+          (meta && (meta.subject || meta.name)) ||
+          (S.Chat && S.Chat.get && S.Chat.get(id) && S.Chat.get(id).name) ||
+          null;
+
+        return { participantes, subject, total: lista.length };
       } catch (e) {
         return { error: String((e && e.message) || e) };
       }
@@ -457,13 +507,18 @@ async function adminsPorStore(chatId) {
     .catch((e) => ({ error: String((e && e.message) || e) }));
 
   if (!res || res.error) {
-    console.error(`[admins] Store: ${(res && res.error) || 'sin respuesta'}`);
+    console.error(`[store] ${chatId}: ${(res && res.error) || 'sin respuesta'}`);
     return null;
   }
-  console.log(
-    `[admins] Store: ${res.admins.length} admin(es) de ${res.total} miembros`
-  );
-  return res.admins;
+  return res;
+}
+
+async function adminsPorStore(chatId) {
+  const g = await grupoPorStore(chatId);
+  if (!g) return null;
+  const admins = g.participantes.filter((p) => p.isAdmin).map((p) => p.id);
+  console.log(`[admins] Store: ${admins.length} admin(es) de ${g.total} miembros`);
+  return admins;
 }
 
 async function adminsDelGrupo(chatId, intento = 0) {

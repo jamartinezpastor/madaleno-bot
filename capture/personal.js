@@ -102,7 +102,7 @@ function mensajesDesde(db, chatId, desde) {
   return db
     .prepare(
       `SELECT author_name, author_id, body, ts FROM messages
-        WHERE chat_id = ? AND ts >= ? AND body != '' AND type = 'chat'
+        WHERE chat_id = ? AND ts >= ? AND body != '' AND ${util.SQL_CON_CONTENIDO}
           AND from_me = 0 AND lower(trim(body)) NOT LIKE ?
         ORDER BY ts ASC`
     )

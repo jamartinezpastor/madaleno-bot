@@ -30,10 +30,6 @@ const BOT_TRIGGER = (process.env.BOT_TRIGGER || '@madaleno').toLowerCase();
 const RATE_PER_HOUR = parseInt(process.env.QA_RATE_PER_HOUR || '20', 10);
 // ¿Publicar el enlace de edición en el propio grupo? Cómodo, pero deja
 // editar a cualquier miembro: el enlace es la credencial.
-const PUBLICO_RATE_PER_HOUR = parseInt(
-  process.env.PUBLICO_RATE_PER_HOUR || '10',
-  10
-);
 const LINK_EN_GRUPO =
   String(process.env.WEB_LINK_EN_GRUPO || 'false').toLowerCase() === 'true';
 const LINK_GRUPO_HORAS = parseInt(process.env.WEB_LINK_GRUPO_HORAS || '2', 10);
@@ -92,7 +88,7 @@ function recentMessages(db, chatId, limit = 50) {
     .stmt(
       db,
       `SELECT author_name, body, ts FROM messages
-       WHERE chat_id = ? AND body != '' AND type = 'chat' ${SIN_RUIDO}
+       WHERE chat_id = ? AND body != '' AND ${util.SQL_CON_CONTENIDO} ${SIN_RUIDO}
        ORDER BY ts DESC LIMIT ?`
     )
     .all(chatId, TRIGGER_LIKE, limit)
@@ -104,7 +100,7 @@ function messagesSince(db, chatId, since) {
     .stmt(
       db,
       `SELECT author_name, author_id, body, ts FROM messages
-       WHERE chat_id = ? AND ts >= ? AND body != '' AND type = 'chat'
+       WHERE chat_id = ? AND ts >= ? AND body != '' AND ${util.SQL_CON_CONTENIDO}
        ${SIN_RUIDO}
        ORDER BY ts ASC`
     )
@@ -214,15 +210,15 @@ function lineaSeguridad() {
   );
 
   const dias = parseInt(process.env.RETENCION_DIAS || '0', 10);
-  partes.push(dias > 0 ? `se conserva ${dias} días` : 'se conserva entero');
+  partes.push(dias > 0 ? `se conserva durante ${dias} días` : 'se conserva entero');
 
-  partes.push('comandos solo para administradores');
+  partes.push('comandos abiertos a todo el grupo');
 
   if (String(process.env.WEB_LINK_EN_GRUPO || '').toLowerCase() === 'true') {
     partes.push('enlace de edición visible en el grupo');
   }
 
-  partes.push(`los textos se analizan con ${gemini.MODEL}`);
+  partes.push(`Modelo IA: ${gemini.MODEL}`);
 
   return `_🔒 ${partes.join(' · ')}._`;
 }
@@ -256,11 +252,12 @@ async function infoReport(db, chatId) {
     llmPart = await gemini.generate(
       'Analizas la conversación reciente de un grupo de WhatsApp. ' +
         'Responde en español, MUY breve, exactamente en este formato:\n' +
-        '🗣️ Temas: <3-4 temas separados por comas>\n' +
-        '🤔 Curiosidad: <un dato curioso o divertido en 1 frase>\n' +
+        '🗣️ Temas: <3-4 temas como #hashtag, separados por espacios>\n' +
+        '🤔 Curiosidad: <un dato sobre la conversación en 1 frase, con ' +
+        'tono sarcástico e irónico, sin llegar a ser cruel>\n' +
         'No inventes; básate solo en lo que veas.',
       transcript(s.sample.slice(-300)),
-      { temperature: 0.4, maxTokens: 220 }
+      { temperature: 0.5, maxTokens: 220 }
     );
   } catch (e) {
     console.error('[qa] info: parte IA falló:', e.message);
@@ -277,11 +274,12 @@ async function summarize24h(db, chatId) {
   if (rows.length === 0) return 'No hay mensajes en las últimas 24h para resumir.';
 
   const out = await gemini.generate(
-    'Resumes conversaciones de WhatsApp en español. Sé MUY breve: máximo ' +
-      '2 frases, una o dos líneas. Solo lo esencial de las últimas 24h ' +
-      '(temas y decisiones). Nada de listas ni encabezados.',
+    'Resumes conversaciones de WhatsApp en español, con tono sarcástico e ' +
+      'irónico (sin llegar a ser cruel ni a burlarte de nadie en concreto). ' +
+      'Sé MUY breve: máximo 2 frases, una o dos líneas. Solo lo esencial de ' +
+      'las últimas 24h (temas y decisiones). Nada de listas ni encabezados.',
     `Resume en 1-2 líneas las últimas 24h:\n\n${transcript(rows)}`,
-    { temperature: 0.2, maxTokens: 200 }
+    { temperature: 0.6, maxTokens: 200 }
   );
   return out || 'No he podido generar el resumen ahora mismo.';
 }
@@ -367,11 +365,6 @@ function checkRate(map, id, limit) {
 
 const norm = util.norm;
 
-
-function esAutorizado(authorId, lista) {
-  return (lista || []).some((x) => util.mismoNumero(authorId, x));
-}
-
 // ---------- Buscador (@madaleno busca ...) ----------
 // Hace lo que la búsqueda de WhatsApp NO puede:
 //   · filtros por autor, mes y año            (de:Ana mes:junio)
@@ -435,7 +428,7 @@ function candidatos(db, chatId, terminos = null, limite = 400) {
       .stmt(
         db,
         `SELECT author_name, body, ts FROM messages
-          WHERE chat_id = ? AND body != '' AND type = 'chat' ${SIN_RUIDO}
+          WHERE chat_id = ? AND body != '' AND ${util.SQL_CON_CONTENIDO} ${SIN_RUIDO}
           ORDER BY ts DESC LIMIT ?`
       )
       .all(chatId, TRIGGER_LIKE, limite);
@@ -443,7 +436,7 @@ function candidatos(db, chatId, terminos = null, limite = 400) {
 
   const condiciones = terminos.map(() => 'body_norm LIKE ?').join(' OR ');
   const sql = `SELECT author_name, body, ts FROM messages
-        WHERE chat_id = ? AND body != '' AND type = 'chat' ${SIN_RUIDO}
+        WHERE chat_id = ? AND body != '' AND ${util.SQL_CON_CONTENIDO} ${SIN_RUIDO}
           AND (${condiciones})
         ORDER BY ts DESC LIMIT ?`;
   return util
@@ -508,6 +501,24 @@ function formatea(lista, total, cabecera, totalTerminos) {
   return `${cabecera}${extra}\n` + lineas.join('\n');
 }
 
+/**
+ * Igual que candidatos(), pero sin depender de que body_norm esté
+ * relleno: normaliza cada mensaje en el momento. Solo se usa como
+ * respaldo cuando la búsqueda rápida no encuentra nada, así que el coste
+ * extra es aceptable y no afecta al caso normal.
+ */
+function candidatosSinBodyNorm(db, chatId, limite = BUSCA_MAX_ESCANEO) {
+  const filas = util
+    .stmt(
+      db,
+      `SELECT author_name, body, ts FROM messages
+        WHERE chat_id = ? AND body != '' AND ${util.SQL_CON_CONTENIDO} ${SIN_RUIDO}
+        ORDER BY ts DESC LIMIT ?`
+    )
+    .all(chatId, TRIGGER_LIKE, limite);
+  return filas.map((f) => ({ ...f, body_norm_real: norm(f.body) }));
+}
+
 async function informeBusqueda(db, chatId, entrada) {
   const { filtros, texto } = parseConsulta(entrada);
   const terminos = terminosDe(texto);
@@ -534,6 +545,38 @@ async function informeBusqueda(db, chatId, entrada) {
       encontrados.slice(0, BUSCA_RESULTADOS),
       encontrados.length,
       `🔍 ${encontrados.length} coincidencia${encontrados.length > 1 ? 's' : ''} con "${texto}":`,
+      terminos.length
+    );
+  }
+
+  // Red de seguridad: la búsqueda rápida filtra por body_norm en SQL, pero
+  // si algún mensaje se quedó sin normalizar (fallo puntual de la
+  // migración, mensaje muy antiguo, etc.) no debe desaparecer para
+  // siempre. Se repasa TODO el historial del chat normalizando en el
+  // momento, más lento pero exhaustivo, y solo se ejecuta cuando la vía
+  // rápida no ha encontrado nada.
+  const todos = filtrar(candidatosSinBodyNorm(db, chatId), filtros);
+  let porRevision = 0;
+  const exhaustivos = todos.filter((f) => {
+    if (!f.body_norm_real) porRevision++;
+    return terminos.some((t) => f.body_norm_real.includes(t));
+  });
+  if (porRevision > 0) {
+    console.log(
+      `[busca] ${porRevision} mensajes sin body_norm en ${chatId}: revisados al vuelo.`
+    );
+  }
+  if (exhaustivos.length > 0) {
+    const puntuados = exhaustivos
+      .map((f) => ({
+        ...f,
+        aciertos: terminos.filter((t) => f.body_norm_real.includes(t)).length,
+      }))
+      .sort((a, b) => b.aciertos - a.aciertos || b.ts - a.ts);
+    return formatea(
+      puntuados.slice(0, BUSCA_RESULTADOS),
+      puntuados.length,
+      `🔍 ${puntuados.length} coincidencia${puntuados.length > 1 ? 's' : ''} con "${texto}":`,
       terminos.length
     );
   }
@@ -595,86 +638,56 @@ async function handleIncoming(
   const rest = trimmed.slice(BOT_TRIGGER.length).trim();
   const lower = norm(rest);
 
-  // ---- Comandos abiertos a cualquier miembro del grupo ----
-  // Son gratis (no usan IA) y de solo lectura.
-  const esPublico =
-    /^(eventos|efemerid|efemer|ayuda|help|comandos|\?)/.test(lower) || !rest;
+  // Todos los comandos son accesibles a cualquier miembro del grupo, sea
+  // o no administrador. La autorización por admin queda solo para la
+  // gestión interna del propio registro de admins (comando oculto
+  // "admin"/"alta"), no como filtro de acceso al resto de comandos.
 
-  // Quién manda aquí: los administradores del grupo en WhatsApp.
-  // Autorización con registro PROPIO: no depende de que WhatsApp responda.
-  // Si responde, sus administradores se incorporan y quedan guardados.
-  let deWhatsApp = null;
-  try {
-    deWhatsApp = getGroupAdmins ? await getGroupAdmins() : null;
-  } catch (e) {
-    console.error('[qa] Admins de WhatsApp no disponibles:', e.message);
-  }
-  const autorizados = admins.autorizados(db, chatId, deWhatsApp);
-  const esAdmin = esAutorizado(authorId, autorizados);
-
-  if (!esPublico) {
-    // El alta NO se hace aquí: escribir el código en un grupo lo dejaría a
-    // la vista de todos (y serviría para otros grupos). Se redirige al
-    // chat privado, donde solo lo ve quien lo escribe.
-    if (/^(alta|soyadmin|registrar)\b/.test(lower)) {
-      const url = botNumber
-        ? `https://wa.me/${String(botNumber).replace(/\D/g, '')}?text=${encodeURIComponent(BOT_TRIGGER + ' alta ')}`
-        : null;
-      return (
-        '🔐 El alta se hace *por privado*, para no dejar el código a la ' +
-        'vista del grupo.\n' +
-        (url ? `Pulsa y envía: ${url}` : `Escríbeme por privado: ${BOT_TRIGGER} alta CÓDIGO`)
-      );
-    }
-
-    if (!esAdmin) {
-      console.log(`[qa] Ignorado (no es admin del grupo): ${authorId}`);
-      return null;
-    }
+  // El alta NO se hace en el grupo: escribir el código allí lo dejaría a
+  // la vista de todos (y serviría para otros grupos). Se redirige al
+  // chat privado, donde solo lo ve quien lo escribe.
+  if (/^(alta|soyadmin|registrar)\b/.test(lower)) {
+    const url = botNumber
+      ? `https://wa.me/${String(botNumber).replace(/\D/g, '')}?text=${encodeURIComponent(BOT_TRIGGER + ' alta ')}`
+      : null;
+    return (
+      '🔐 El alta se hace *por privado*, para no dejar el código a la ' +
+      'vista del grupo.\n' +
+      (url ? `Pulsa y envía: ${url}` : `Escríbeme por privado: ${BOT_TRIGGER} alta CÓDIGO`)
+    );
   }
 
-  const AYUDA_TODOS =
-    '🤖 *Madaleno*\n' +
-    '• `eventos` — próximos 30 días del calendario\n' +
-    '• `efemérides` — qué pasó un día como hoy\n' +
-    '• `ayuda` — esta lista\n' +
-    `_Por privado puedes pedirme ${BOT_TRIGGER} miresumen: solo lo que te afecta._`;
-
-  const AYUDA_ADMIN =
-    '*Como admin:*\n' +
-    '• `resumen` — las últimas 24 h en 2 líneas\n' +
-    '• `info` — estadísticas del grupo\n' +
-    '• `gif` — animación con humor de lo que se habla\n' +
-    '• `orla` — orla con las fotos del grupo\n' +
-    '• `busca <palabras>` — encuentra mensajes antiguos\n' +
-    '• `calendario` — enlace privado para editar el calendario\n' +
-    '• `añade 3/10 Cena` — apunta un evento (`borra 2` lo quita)\n' +
-    '• `admin 34600111222` — dar permisos a alguien (`admin` los lista)\n' +
-    '• `<pregunta>` — respondo con mis datos y el historial';
-
-  const AYUDA = esAdmin ? `${AYUDA_TODOS}\n\n${AYUDA_ADMIN}` : AYUDA_TODOS;
+  // Solo los comandos activos y visibles. El resto (efemérides, eventos,
+  // miresumen, web, busca, calendario, añade, admin) siguen funcionando
+  // si se escriben directamente: están en stand-by, ocultos de la ayuda
+  // mientras se pulen.
+  const AYUDA =
+    '🤖 *Madaleno Bot*\n' +
+    `${BOT_TRIGGER} + comando (o solo ${BOT_TRIGGER} para ver esto)\n\n` +
+    '• `resumen`\n' +
+    '• `info`\n' +
+    '• `gif`\n' +
+    '• `orla`\n' +
+    '• `ayuda` / `help` / `?`';
 
   if (!rest) return AYUDA;
 
-  // Los comandos públicos también tienen tope, más generoso: son gratis
-  // pero no queremos que nadie inunde el grupo con listados.
-  const tope = esPublico ? PUBLICO_RATE_PER_HOUR : RATE_PER_HOUR;
-  if (!checkRate(rateMap, authorId, tope)) {
-    return esPublico ? null : 'Has alcanzado el límite por hora. Prueba luego.';
+  // Un único tope por persona para todos los comandos; gif/orla tienen el
+  // suyo propio, más ajustado, por ser los más costosos.
+  if (!checkRate(rateMap, authorId, RATE_PER_HOUR)) {
+    return 'Has alcanzado el límite por hora. Prueba luego.';
   }
 
   try {
     if (/^(ayuda|help|comandos|\?)/.test(lower)) return AYUDA;
 
-    // Público: lista de solo lectura, 30 días
+    // Oculto (stand-by): sigue funcionando si se escribe, sin aparecer
+    // en la ayuda. Siempre en modo "público": no anuncia los comandos de
+    // edición del calendario, que también están ocultos.
     if (/^eventos/.test(lower)) {
       const lista = calendario.proximos(cfg, 30);
       ultimoCalendario.set(chatId, lista);
-      // A quien no es admin no se le anuncian los comandos de edición.
-      return calendario.informe(cfg, 30, {
-        publico: !esAdmin,
-        titulo: 'Eventos',
-      });
+      return calendario.informe(cfg, 30, { publico: true, titulo: 'Eventos' });
     }
     if (/^resum/.test(lower)) return await summarize24h(db, chatId);
     if (/^(info|stats|estad)/.test(lower)) return await infoReport(db, chatId);

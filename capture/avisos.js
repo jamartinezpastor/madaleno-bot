@@ -56,7 +56,7 @@ function mensajesDeHoy(db, chatId) {
     .stmt(
       db,
       `SELECT body FROM messages
-       WHERE chat_id = ? AND ts >= ? AND body != '' AND type = 'chat'
+       WHERE chat_id = ? AND ts >= ? AND body != '' AND ${util.SQL_CON_CONTENIDO}
          AND from_me = 0
        ORDER BY ts ASC`
     )
