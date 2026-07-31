@@ -7,6 +7,12 @@ services:
     environment:
       - DATA_DIR=/data
       - CAPTURE_PORT=3000
+      # Importante para "hora más activa", los avisos diarios y las fechas
+      # del calendario: Node usa TZ automáticamente (sin que ningún código
+      # la lea explícitamente) para interpretar fechas y horas. Sin esto,
+      # el contenedor corre en UTC y todo se calcula desplazado respecto a
+      # tu hora real.
+      - TZ=${TZ:-Europe/Madrid}
     volumes:
       # Sesión de WhatsApp + base de datos (persistente)
       - ./data:/data

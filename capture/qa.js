@@ -19,6 +19,7 @@ const csv = require('./csv');
 const groups = require('./groups');
 const util = require('./util');
 const admins = require('./admins');
+const baseDatos = require('./db');
 const gemini = require('./gemini');
 const ephemeris = require('./ephemeris');
 const gifmaker = require('./gifmaker');
@@ -138,13 +139,11 @@ function computeStats(db, chatId) {
 
   const byUser = new Map();
   const emojiCount = new Map();
-  let totalChars = 0;
   const hourHist = new Array(24).fill(0);
 
   for (const m of rows) {
     const name = m.author_name || m.author_id || 'Alguien';
     byUser.set(name, (byUser.get(name) || 0) + 1);
-    totalChars += m.body.length;
     hourHist[new Date(m.ts * 1000).getHours()]++;
     const found = m.body.match(EMOJI_RE);
     if (found) for (const e of found) emojiCount.set(e, (emojiCount.get(e) || 0) + 1);
@@ -184,14 +183,21 @@ function computeStats(db, chatId) {
     reactorName = row ? row.author_name : null;
   }
 
+  const hottestHour = hourHist.indexOf(Math.max(...hourHist));
+
+  // Media de mensajes al día del periodo analizado. Se usa la coma
+  // decimal a la española escrita con apóstrofo ("5'6"), como se pidió.
+  const diasPeriodo = Math.max(1, (Math.floor(Date.now() / 1000) - since) / 86400);
+  const porDia = (rows.length / diasPeriodo).toFixed(1).replace('.', "'");
+
   return {
     totalMsgs: rows.length,
     topUsers,
     topEmoji,
     mostReacted,
     topReactor: reactorName ? { name: reactorName, n: topReactor.n } : null,
-    avgLen: rows.length ? Math.round(totalChars / rows.length) : 0,
-    hottestHour: hourHist.indexOf(Math.max(...hourHist)),
+    porDia,
+    hottestHour,
     sample: rows,
   };
 }
@@ -203,16 +209,20 @@ function computeStats(db, chatId) {
 function lineaSeguridad() {
   const partes = [];
 
-  partes.push(
-    process.env.DB_KEY
-      ? 'historial cifrado en el servidor (AES-256)'
-      : 'historial sin cifrar en el servidor'
-  );
-
-  const dias = parseInt(process.env.RETENCION_DIAS || '0', 10);
-  partes.push(dias > 0 ? `se conserva durante ${dias} días` : 'se conserva entero');
-
-  partes.push('comandos abiertos a todo el grupo');
+  // Estado REAL del fichero, no la simple presencia de DB_KEY: una
+  // variable de entorno dice lo que pretendes, no lo que hay en disco.
+  const cifrada = baseDatos.estaCifrada();
+  if (cifrada === true) {
+    partes.push('historial cifrado en el servidor (AES-256)');
+  } else if (cifrada === false) {
+    partes.push(
+      process.env.DB_KEY
+        ? '⚠️ DB_KEY configurada pero el historial NO está cifrado'
+        : 'historial sin cifrar en el servidor'
+    );
+  } else {
+    partes.push('estado del cifrado no verificable');
+  }
 
   if (String(process.env.WEB_LINK_EN_GRUPO || '').toLowerCase() === 'true') {
     partes.push('enlace de edición visible en el grupo');
@@ -230,38 +240,44 @@ async function infoReport(db, chatId) {
   }
 
   const lineas = [];
-  lineas.push('📊 *Info del grupo* (esta semana + la pasada)');
-  lineas.push(`💬 ${s.totalMsgs} mensajes · media ${s.avgLen} caracteres`);
-  if (s.topEmoji) lineas.push(`😀 Emoji estrella: ${s.topEmoji[0]} (${s.topEmoji[1]} veces)`);
+  lineas.push('*Info del grupo* (Últimas semanas)');
+  lineas.push(`*Mensajes*: ${s.totalMsgs} · (${s.porDia} al día)`);
+  if (s.topEmoji) {
+    lineas.push(`*Emoji estrella*: ${s.topEmoji[0]} (${s.topEmoji[1]} veces)`);
+  }
   lineas.push(
-    '🏆 Top escritores: ' +
+    '*Top escritores*: ' +
       s.topUsers.map(([n, c], i) => `${i + 1}. ${n} (${c})`).join(' · ')
   );
   if (s.mostReacted && s.mostReacted.name) {
-    lineas.push(`🔥 Más reacciones recibidas: ${s.mostReacted.name} (${s.mostReacted.n})`);
+    lineas.push(
+      `*Más reacciones recibidas*: ${s.mostReacted.name} (${s.mostReacted.n})`
+    );
   } else {
-    lineas.push('🔥 Reacciones: aún no hay datos suficientes');
+    lineas.push('*Reacciones*: aún no hay datos suficientes');
   }
   if (s.topReactor) {
-    lineas.push(`👍 Quien más reacciona: ${s.topReactor.name} (${s.topReactor.n})`);
+    lineas.push(`*Quien más reacciona*: ${s.topReactor.name} (${s.topReactor.n})`);
   }
-  lineas.push(`⏰ Hora más activa: sobre las ${s.hottestHour}:00`);
+  lineas.push(`*Hora más activa*: sobre las ${s.hottestHour}:00`);
 
   let llmPart = '';
   try {
     llmPart = await gemini.generate(
       'Analizas la conversación reciente de un grupo de WhatsApp. ' +
-        'Responde en español, MUY breve, exactamente en este formato:\n' +
-        '🗣️ Temas: <3-4 temas como #hashtag, separados por espacios>\n' +
-        '🤔 Curiosidad: <un dato sobre la conversación en 1 frase, con ' +
+        'Responde en español, MUY breve, exactamente en este formato ' +
+        '(respeta los asteriscos, son negrita de WhatsApp):\n' +
+        '*Temas*: <3-4 temas como #hashtag, separados por espacios>\n' +
+        '*Curiosidad*: <un dato sobre la conversación en 1 frase, con ' +
         'tono sarcástico e irónico, sin llegar a ser cruel>\n' +
-        'No inventes; básate solo en lo que veas.',
+        'No empieces las líneas con emojis. No inventes; básate solo en ' +
+        'lo que veas.',
       transcript(s.sample.slice(-300)),
       { temperature: 0.5, maxTokens: 220 }
     );
   } catch (e) {
     console.error('[qa] info: parte IA falló:', e.message);
-    llmPart = '🗣️ Temas: (no disponible ahora mismo)';
+    llmPart = '*Temas*: (no disponible ahora mismo)';
   }
 
   return lineas.join('\n') + '\n' + llmPart + '\n\n' + lineaSeguridad();
@@ -662,12 +678,15 @@ async function handleIncoming(
   // si se escriben directamente: están en stand-by, ocultos de la ayuda
   // mientras se pulen.
   const AYUDA =
-    '🤖 *Madaleno Bot*\n' +
-    `${BOT_TRIGGER} + comando (o solo ${BOT_TRIGGER} para ver esto)\n\n` +
+    '🤖 *Madaleno Bot*\n\n' +
+    `Escríbeme en el grupo con ${BOT_TRIGGER} seguido de un comando.\n` +
+    `Sin comando (solo ${BOT_TRIGGER}) verás esta lista.\n\n` +
     '• `resumen`\n' +
     '• `info`\n' +
     '• `gif`\n' +
     '• `orla`\n' +
+    '• `miresumen` — escríbemelo *por privado*, no aquí: te cuento solo ' +
+    'lo que te afecta a ti. Añade `semana` para 7 días.\n' +
     '• `ayuda` / `help` / `?`';
 
   if (!rest) return AYUDA;
@@ -821,14 +840,33 @@ async function handleIncoming(
         return 'He hecho ya bastantes composiciones por ahora 😅 Prueba luego.';
       }
       if (!getDatosOrla) return 'No puedo componer la orla en este momento.';
-      const datos = await getDatosOrla(cfg.nombres || {});
-      const media = await orla.crearOrla(getBrowser, datos);
-      return { media };
+
+      // Errores propios y explicados: si falla, conviene saber DÓNDE, no
+      // recibir un "Ups" genérico que no dice nada ni a ti ni a los logs.
+      let datos;
+      try {
+        datos = await getDatosOrla(cfg.nombres || {});
+      } catch (e) {
+        console.error('[orla] Fallo recopilando miembros:', e.stack || e);
+        return `😕 No he podido reunir a los miembros del grupo.\n_${e.message}_`;
+      }
+
+      if (!datos || !datos.miembros || datos.miembros.length === 0) {
+        return '😕 No he encontrado miembros para la orla todavía.';
+      }
+
+      try {
+        const media = await orla.crearOrla(getBrowser, datos);
+        return { media };
+      } catch (e) {
+        console.error('[orla] Fallo componiendo la imagen:', e.stack || e);
+        return `😕 Tengo los ${datos.miembros.length} miembros, pero no he podido dibujar la orla.\n_${e.message}_`;
+      }
     }
 
     return await freeQuestion(db, chatId, rest, cfg);
   } catch (err) {
-    console.error('[qa] Error:', err.message);
+    console.error('[qa] Error:', err.stack || err.message || err);
     return 'Ups, no he podido procesarlo ahora mismo.';
   }
 }

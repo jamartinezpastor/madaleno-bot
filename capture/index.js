@@ -260,15 +260,44 @@ function mensajesPorAutor(chatId) {
   return cuenta;
 }
 
+function participantesDesdeBD(chatId) {
+  try {
+    return db
+      .prepare(
+        `SELECT DISTINCT author_id AS id FROM messages
+          WHERE chat_id = ? AND author_id IS NOT NULL AND from_me = 0`
+      )
+      .all(chatId)
+      .map((r) => ({ id: r.id, isAdmin: false }));
+  } catch (e) {
+    console.error('[orla] Respaldo por BD falló:', e.message);
+    return [];
+  }
+}
+
 async function datosOrla(chatId, sobrescrituras = {}) {
-  // El nombre del grupo y sus participantes se leen del store (grupoPorStore),
-  // no de getChatById: es la misma llamada rota que bloqueaba a los admins,
-  // y aquí impedía que la orla funcionase en absoluto.
-  const g = await grupoPorStore(chatId);
+  // El nombre del grupo y sus participantes se leen del store
+  // (grupoPorStore), no de getChatById (misma llamada rota que ya dio
+  // problemas con los admins). Si el store falla, se recurre a quienes
+  // hayan escrito alguna vez en el chat según nuestra propia base de
+  // datos: no es una lista tan completa (quien nunca escribió no sale),
+  // pero es mucho mejor que dejar la orla completamente inoperativa.
+  let g = await grupoPorStore(chatId);
+  let porRespaldo = false;
   if (!g || !Array.isArray(g.participantes) || g.participantes.length === 0) {
-    throw new Error(
-      'No consigo leer los miembros del grupo ahora mismo (fallo de WhatsApp Web).'
+    const respaldo = participantesDesdeBD(chatId);
+    if (respaldo.length === 0) {
+      throw new Error(
+        'No consigo leer los miembros del grupo ahora mismo (fallo de WhatsApp Web) ' +
+          'y tampoco tengo mensajes previos de nadie en este chat.'
+      );
+    }
+    console.log(
+      `[orla] Store no disponible, uso ${respaldo.length} miembro(s) por ` +
+        'historial de mensajes.'
     );
+    g = { participantes: respaldo, subject: null };
+    porRespaldo = true;
   }
 
   const yo = client.info && client.info.wid && client.info.wid._serialized;
@@ -286,40 +315,54 @@ async function datosOrla(chatId, sobrescrituras = {}) {
     recortado = true;
   }
 
+  // Las llamadas a WhatsApp Web (contacto y foto) no tienen tiempo límite
+  // propio: en un grupo de 25 personas son 50 peticiones de red y basta
+  // que UNA se cuelgue para que la orla se quede esperando eternamente,
+  // sin error ni respuesta. Se acotan con timeout y se lanzan por lotes
+  // en paralelo, así el tiempo total es predecible.
+  const conTimeout = (promesa, ms, siFalla = null) =>
+    Promise.race([
+      Promise.resolve(promesa).catch(() => siFalla),
+      new Promise((r) => setTimeout(() => r(siFalla), ms)),
+    ]);
+
+  const LOTE = 6;
+  const TIMEOUT_MS = parseInt(process.env.ORLA_TIMEOUT_MS || '4000', 10);
   const miembros = [];
-  for (const p of participantes) {
-    const id = p.id;
-    const digitos = id.split('@')[0];
 
-    // Nombre, por orden de preferencia:
-    //  1) el que TÚ tienes guardado en la agenda del teléfono del bot
-    //  2) el que la persona se ha puesto en WhatsApp (pushname)
-    //  3) el que hayas fijado a mano en el CSV
-    //  4) el que usó al escribir en el grupo
-    //  5) su número
-    let nombre = null;
-    try {
-      const c = await client.getContactById(id);
-      // c.name = agenda del bot · c.pushname = el que usa la persona
-      nombre = c.name || c.shortName || c.pushname || null;
-    } catch (_) {}
-    if (!nombre) nombre = sobrescrituras[digitos] || nombreDesdeBD(id);
-    if (!nombre) nombre = `+${digitos}`;
+  for (let i = 0; i < participantes.length; i += LOTE) {
+    const lote = participantes.slice(i, i + LOTE);
+    const resueltos = await Promise.all(
+      lote.map(async (p) => {
+        const id = p.id;
+        const digitos = id.split('@')[0];
 
-    let foto = null;
-    try {
-      foto = await client.getProfilePicUrl(id);
-    } catch (_) {
-      foto = null; // privacidad: sin foto accesible
-    }
+        // Nombre, por orden de preferencia:
+        //  1) el que TÚ tienes guardado en la agenda del teléfono del bot
+        //  2) el que la persona se ha puesto en WhatsApp (pushname)
+        //  3) el que hayas fijado a mano en el CSV
+        //  4) el que usó al escribir en el grupo
+        //  5) su número
+        let nombre = null;
+        const c = await conTimeout(client.getContactById(id), TIMEOUT_MS);
+        if (c) nombre = c.name || c.shortName || c.pushname || null;
+        if (!nombre) nombre = sobrescrituras[digitos] || nombreDesdeBD(id);
+        if (!nombre) nombre = `+${digitos}`;
 
-    miembros.push({ id, nombre, foto });
+        // Sin foto accesible (privacidad o timeout) se usa el avatar de
+        // iniciales, que ya contempla el módulo de la orla.
+        const foto = await conTimeout(client.getProfilePicUrl(id), TIMEOUT_MS);
+
+        return { id, nombre, foto };
+      })
+    );
+    miembros.push(...resueltos);
   }
 
-  let fotoGrupo = null;
-  try {
-    fotoGrupo = await client.getProfilePicUrl(chatId);
-  } catch (_) {}
+  const fotoGrupo = await conTimeout(
+    client.getProfilePicUrl(chatId),
+    TIMEOUT_MS
+  );
 
   const conFoto = miembros.filter((m) => m.foto).length;
   console.log(
@@ -611,7 +654,7 @@ async function atenderPrivado(msg) {
       getEnlaceCalendario: (chatId) => enlaceCalendario(from, chatId),
     });
 
-    if (respuesta) await client.sendMessage(from, respuesta);
+    if (respuesta) await client.sendMessage(from, util.firmar(respuesta));
   } catch (err) {
     console.error('[privado] Error:', err.stack || err);
   }
@@ -747,13 +790,13 @@ client.on('message_create', async (msg) => {
     });
 
     if (typeof reply === 'string' && reply) {
-      await client.sendMessage(chatId, reply);
+      await client.sendMessage(chatId, util.firmar(reply));
     } else if (reply && reply.media) {
       // GIF/MP4 generado por @madaleno gif
       const m = reply.media;
       const media = MessageMedia.fromFilePath(m.path);
       await client.sendMessage(chatId, media, {
-        caption: m.caption || undefined,
+        caption: util.firmar(m.caption || ''),
         // WhatsApp reproduce en bucle los MP4 enviados como "gif"
         sendVideoAsGif: !!m.isVideo,
       });
@@ -767,6 +810,28 @@ client.on('message_create', async (msg) => {
   }
 });
 
+/**
+ * Serializa un id de mensaje de WhatsApp al formato "fromMe_remote_id".
+ *
+ * El evento 'message_reaction' no siempre entrega un objeto de mensaje
+ * completamente hidratado: a veces `msgId._serialized` no existe. La
+ * versión anterior caía entonces en `String(reaction.msgId)`, que para
+ * cualquier objeto plano sin `toString()` propio da la cadena constante
+ * "[object Object]" — SIEMPRE la misma, para cualquier mensaje. Como la
+ * clave de la tabla de reacciones es (msg_id, reactor_id), todas las
+ * reacciones de una misma persona a mensajes distintos colisionaban en
+ * la misma fila y se sobrescribían: por eso el contador se quedaba
+ * siempre en 1, por muchas veces que esa persona reaccionara.
+ */
+function serializarMsgId(msgId) {
+  if (!msgId) return null;
+  if (msgId._serialized) return msgId._serialized;
+  if (msgId.id && msgId.remote !== undefined) {
+    return `${msgId.fromMe ? 'true' : 'false'}_${msgId.remote}_${msgId.id}`;
+  }
+  return null;
+}
+
 // Captura de reacciones (👍❤️😂...). WhatsApp emite 'message_reaction'
 // tanto al poner como al quitar una reacción (emoji vacío = retirada).
 client.on('message_reaction', (reaction) => {
@@ -776,8 +841,20 @@ client.on('message_reaction', (reaction) => {
     if (!chatId) return;
     if (GROUP_IDS.length > 0 && !GROUP_IDS.includes(chatId)) return;
 
+    const msgId = serializarMsgId(reaction.msgId);
+    if (!msgId) {
+      // Sin un id fiable no se puede distinguir de qué mensaje viene la
+      // reacción: mejor descartarla que guardar una fila que colisione
+      // con otras y falsee las estadísticas.
+      console.error(
+        '[reacciones] Sin id de mensaje fiable, descartada:',
+        JSON.stringify(reaction).slice(0, 200)
+      );
+      return;
+    }
+
     upsertReaction.run({
-      msg_id: reaction.msgId?._serialized || String(reaction.msgId),
+      msg_id: msgId,
       chat_id: chatId,
       reactor_id: reaction.senderId || 'desconocido',
       emoji: reaction.reaction || '', // '' cuando se retira
@@ -928,7 +1005,7 @@ client.on('ready', () => {
           const cfg = groups.paraChat(DOCS_DIR, d.id);
           const msgs = await avisos.pendientes(db, d.id, cfg);
           for (const text of msgs) {
-            await client.sendMessage(d.id, text);
+            await client.sendMessage(d.id, util.firmar(text));
           }
         } catch (e) {
           console.error(`[avisos] Error en ${d.id}:`, e.message);
@@ -1044,7 +1121,9 @@ web.arrancar({
       }
       await client.sendMessage(
         chatId,
-        `🗓️ ${quien || 'Alguien'} ${accion} en el calendario: *${texto}*`
+        util.firmar(
+          `🗓️ ${quien || 'Alguien'} ${accion} en el calendario: *${texto}*`
+        )
       );
     } catch (e) {
       console.error('[web] No pude avisar del cambio:', e.message);

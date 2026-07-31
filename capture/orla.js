@@ -152,14 +152,39 @@ async function crearOrla(getBrowser, datos) {
   const page = await browser.newPage();
   try {
     await page.setViewport({ width: ANCHO, height: 900, deviceScaleFactor: 1 });
-    await page.setContent(html(datos), { waitUntil: 'load' });
+    await page.setContent(html(datos), {
+      waitUntil: 'load',
+      timeout: 20000,
+    });
+
     // Margen para que terminen de descargarse las fotos de perfil.
-    await page
-      .waitForNetworkIdle({ idleTime: 700, timeout: 20000 })
-      .catch(() => {});
+    // waitForNetworkIdle no existe en todas las versiones de Puppeteer: si
+    // falta, llamarlo lanza un TypeError que NO capturaría un .catch() de
+    // promesa, así que se comprueba antes y se envuelve en try.
+    try {
+      if (typeof page.waitForNetworkIdle === 'function') {
+        await page
+          .waitForNetworkIdle({ idleTime: 700, timeout: 8000 })
+          .catch(() => {});
+      } else {
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    } catch (_) {
+      // Si falla la espera, se captura igualmente: peor imagen, no fallo.
+    }
 
     const destino = path.join(os.tmpdir(), `orla-${Date.now()}.png`);
     await page.screenshot({ path: destino, fullPage: true, type: 'png' });
+
+    // Verificación real: que el fichero exista y no esté vacío. Sin esto,
+    // un fallo silencioso acabaría en un envío roto a WhatsApp.
+    if (!fs.existsSync(destino) || fs.statSync(destino).size === 0) {
+      throw new Error('La imagen de la orla salió vacía');
+    }
+
+    console.log(
+      `[orla] Imagen generada: ${Math.round(fs.statSync(destino).size / 1024)} KB`
+    );
 
     return {
       path: destino,

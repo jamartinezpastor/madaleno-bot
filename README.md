@@ -54,6 +54,15 @@ miembro, sea o no administrador:
 | `orla`                 | Orla con las fotos del grupo                   |
 | `ayuda` / `help` / `?` | Lista de comandos                              |
 
+**chat privado** con el bot:
+
+| Comando     | Qué hace                                          |
+| ----------- | ------------------------------------------------- |
+| `miresumen` | Solo lo que te afecta a ti (`semana` para 7 días) |
+
+Si compartís varios grupos, pregunta de cuál lo quieres y basta con
+responder el número. Todos los mensajes del bot terminan con `🫴🏻🪙`. |
+
 ## Datos: un CSV por grupo
 
 En `data/docs/`, un fichero por grupo **con el id como nombre**

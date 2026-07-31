@@ -94,6 +94,21 @@ const SQL_CON_CONTENIDO =
 /** Disparador del bot, centralizado para que todos los módulos vean el mismo. */
 const TRIGGER = (process.env.BOT_TRIGGER || '@madaleno').toLowerCase();
 
+/** Marca que cierra todos los mensajes del bot. */
+const FIRMA = '🫴🏻🪙';
+
+/**
+ * Añade la firma al final de cualquier mensaje del bot, en su propia
+ * línea. No la duplica si ya está (por ejemplo, si un texto ya firmado
+ * vuelve a pasar por aquí).
+ */
+function firmar(texto) {
+  const t = String(texto == null ? '' : texto).replace(/\s+$/, '');
+  if (!t) return t;
+  if (t.endsWith(FIRMA)) return t;
+  return `${t}\n\n${FIRMA}`;
+}
+
 module.exports = {
   norm,
   soloDigitos,
@@ -102,4 +117,6 @@ module.exports = {
   stmt,
   SQL_CON_CONTENIDO,
   TRIGGER,
+  FIRMA,
+  firmar,
 };

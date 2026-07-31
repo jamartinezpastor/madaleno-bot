@@ -70,7 +70,7 @@ function migrarACifrada(ruta, clave) {
  * Abre la base de datos aplicando cifrado si procede.
  * @returns {Database}
  */
-function abrir(ruta) {
+function abrirInterno(ruta) {
   const clave = process.env.DB_KEY || '';
   const existe = fs.existsSync(ruta) && fs.statSync(ruta).size > 0;
 
@@ -138,4 +138,72 @@ function abrir(ruta) {
   return migrarACifrada(ruta, clave);
 }
 
-module.exports = { abrir };
+/**
+ * Abre la base y deja constancia de si quedó REALMENTE cifrada,
+ * comprobando la cabecera del fichero en disco. Si pides cifrado y no se
+ * consiguió, se avisa a gritos en los logs: es justo el caso en el que no
+ * quieres enterarte tarde.
+ */
+function abrir(ruta) {
+  const db = abrirInterno(ruta);
+  const clave = process.env.DB_KEY || '';
+
+  rutaBase = ruta;
+  cifradaDeVerdad = ficheroCifrado(ruta);
+
+  if (clave && cifradaDeVerdad === false) {
+    console.error(
+      '[db] ¡ATENCIÓN! DB_KEY está configurada pero el fichero NO está ' +
+        'cifrado. Revisa los logs de arranque: la migración no se completó.'
+    );
+  } else if (clave && cifradaDeVerdad === true) {
+    console.log('[db] Verificado: la base de datos está cifrada.');
+  } else if (!clave && cifradaDeVerdad === false) {
+    console.log('[db] Base de datos sin cifrar (no hay DB_KEY).');
+  }
+
+  return db;
+}
+
+/**
+ * ¿Está el fichero realmente cifrado?
+ *
+ * No se fía de que exista DB_KEY: una variable de entorno dice lo que
+ * PRETENDES, no lo que hay en disco. Un SQLite sin cifrar empieza siempre
+ * por la cabecera "SQLite format 3"; si esos bytes no están, el contenido
+ * está cifrado. Así el bot informa del estado real, y no puede mentir ni
+ * diciendo "cifrado" cuando la migración falló, ni al revés.
+ */
+function ficheroCifrado(ruta) {
+  try {
+    if (!fs.existsSync(ruta) || fs.statSync(ruta).size === 0) return null;
+    const fd = fs.openSync(ruta, 'r');
+    const buf = Buffer.alloc(16);
+    fs.readSync(fd, buf, 0, 16, 0);
+    fs.closeSync(fd);
+    return !buf.toString('utf8').startsWith('SQLite format 3');
+  } catch (e) {
+    console.error('[db] No pude comprobar el cifrado:', e.message);
+    return null;
+  }
+}
+
+// Estado real, calculado al abrir la base. null = no se pudo determinar.
+let cifradaDeVerdad = null;
+let rutaBase = null;
+
+/**
+ * Estado real del cifrado, para que el bot informe sin inventar.
+ *
+ * Si al arrancar el fichero estaba recién creado (0 bytes), no había
+ * cabecera que leer y quedó como "no verificable"; en cuanto hay datos se
+ * puede comprobar de verdad, así que se reintenta una vez.
+ */
+function estaCifrada() {
+  if (cifradaDeVerdad === null && rutaBase) {
+    cifradaDeVerdad = ficheroCifrado(rutaBase);
+  }
+  return cifradaDeVerdad;
+}
+
+module.exports = { abrir, estaCifrada, ficheroCifrado };
