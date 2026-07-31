@@ -1,4 +1,4 @@
-'use strict';
+"use strict";
 
 /**
  * Servicio de captura 24/7.
@@ -11,28 +11,28 @@
  *    mensajes y enviar textos desde scripts propios si hace falta.
  */
 
-const path = require('path');
-const fs = require('fs');
-const express = require('express');
-const abrirBaseDatos = require('./db').abrir;
-const qrcode = require('qrcode-terminal');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const qa = require('./qa');
-const avisos = require('./avisos');
-const groups = require('./groups');
-const admins = require('./admins');
-const util = require('./util');
-const personal = require('./personal');
-const tokens = require('./token');
-const web = require('./web');
+const path = require("path");
+const fs = require("fs");
+const express = require("express");
+const abrirBaseDatos = require("./db").abrir;
+const qrcode = require("qrcode-terminal");
+const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
+const qa = require("./qa");
+const avisos = require("./avisos");
+const groups = require("./groups");
+const admins = require("./admins");
+const util = require("./util");
+const personal = require("./personal");
+const tokens = require("./token");
+const web = require("./web");
 
 // ---------- Configuración ----------
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
-const DB_PATH = path.join(DATA_DIR, 'messages.db');
-const DOCS_DIR = path.join(DATA_DIR, 'docs');
-const PORT = parseInt(process.env.CAPTURE_PORT || '3000', 10);
-const GROUP_IDS = (process.env.GROUP_IDS || '')
-  .split(',')
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "..", "data");
+const DB_PATH = path.join(DATA_DIR, "messages.db");
+const DOCS_DIR = path.join(DATA_DIR, "docs");
+const PORT = parseInt(process.env.CAPTURE_PORT || "3000", 10);
+const GROUP_IDS = (process.env.GROUP_IDS || "")
+  .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
@@ -40,7 +40,7 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ---------- Base de datos ----------
 const db = abrirBaseDatos(DB_PATH);
-db.pragma('journal_mode = WAL');
+db.pragma("journal_mode = WAL");
 db.exec(`
   CREATE TABLE IF NOT EXISTS messages (
     id           TEXT PRIMARY KEY,
@@ -79,32 +79,41 @@ const upsertReaction = db.prepare(`
 // Migración suave: añade columnas nuevas a bases de datos ya creadas.
 {
   const cols = db
-    .prepare('PRAGMA table_info(messages)')
+    .prepare("PRAGMA table_info(messages)")
     .all()
     .map((c) => c.name);
-  if (!cols.includes('from_me')) {
-    db.exec('ALTER TABLE messages ADD COLUMN from_me INTEGER NOT NULL DEFAULT 0');
-    console.log('[db] Migración: columna from_me añadida.');
+  if (!cols.includes("from_me")) {
+    db.exec(
+      "ALTER TABLE messages ADD COLUMN from_me INTEGER NOT NULL DEFAULT 0",
+    );
+    console.log("[db] Migración: columna from_me añadida.");
   }
 }
 
 // Migración: body_norm permite filtrar dentro de SQLite (rápido) en vez
 // de traerse decenas de miles de mensajes a memoria para normalizarlos.
 try {
-  const cols = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
-  if (!cols.includes('body_norm')) {
-    db.exec('ALTER TABLE messages ADD COLUMN body_norm TEXT');
-    console.log('[db] Migración: columna body_norm añadida.');
+  const cols = db
+    .prepare("PRAGMA table_info(messages)")
+    .all()
+    .map((c) => c.name);
+  if (!cols.includes("body_norm")) {
+    db.exec("ALTER TABLE messages ADD COLUMN body_norm TEXT");
+    console.log("[db] Migración: columna body_norm añadida.");
   }
   const pendientes = db
-    .prepare("SELECT COUNT(*) n FROM messages WHERE body_norm IS NULL AND body != ''")
+    .prepare(
+      "SELECT COUNT(*) n FROM messages WHERE body_norm IS NULL AND body != ''",
+    )
     .get().n;
   if (pendientes > 0) {
     console.log(`[db] Normalizando ${pendientes} mensajes antiguos...`);
     const leer = db.prepare(
-      "SELECT id, body FROM messages WHERE body_norm IS NULL AND body != '' LIMIT 5000"
+      "SELECT id, body FROM messages WHERE body_norm IS NULL AND body != '' LIMIT 5000",
     );
-    const escribir = db.prepare('UPDATE messages SET body_norm = ? WHERE id = ?');
+    const escribir = db.prepare(
+      "UPDATE messages SET body_norm = ? WHERE id = ?",
+    );
     let restantes = pendientes;
     while (restantes > 0) {
       const lote = leer.all();
@@ -114,26 +123,28 @@ try {
       })();
       restantes -= lote.length;
     }
-    console.log('[db] Normalización completada.');
+    console.log("[db] Normalización completada.");
   }
 } catch (e) {
-  console.error('[db] Migración body_norm:', e.message);
+  console.error("[db] Migración body_norm:", e.message);
 }
 
 // Retención opcional: sin esto la base de datos crece indefinidamente.
 // 0 = guardar todo (por defecto).
-const RETENCION_DIAS = parseInt(process.env.RETENCION_DIAS || '0', 10);
+const RETENCION_DIAS = parseInt(process.env.RETENCION_DIAS || "0", 10);
 function purgarAntiguos() {
   if (!RETENCION_DIAS) return;
   try {
     const corte = Math.floor(Date.now() / 1000) - RETENCION_DIAS * 86400;
-    const r = db.prepare('DELETE FROM messages WHERE ts < ?').run(corte);
+    const r = db.prepare("DELETE FROM messages WHERE ts < ?").run(corte);
     if (r.changes > 0) {
-      db.prepare('DELETE FROM reactions WHERE ts < ?').run(corte);
-      console.log(`[db] Purgados ${r.changes} mensajes de más de ${RETENCION_DIAS} días.`);
+      db.prepare("DELETE FROM reactions WHERE ts < ?").run(corte);
+      console.log(
+        `[db] Purgados ${r.changes} mensajes de más de ${RETENCION_DIAS} días.`,
+      );
     }
   } catch (e) {
-    console.error('[db] Purga:', e.message);
+    console.error("[db] Purga:", e.message);
   }
 }
 purgarAntiguos();
@@ -144,27 +155,32 @@ setInterval(purgarAntiguos, 24 * 3600 * 1000);
 // cuerpo llega como "@<id> comando" y se colaba en resúmenes y
 // estadísticas. Al capturar sí sabemos si el mensaje era para el bot.
 try {
-  const cols = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
-  if (!cols.includes('es_comando')) {
-    db.exec('ALTER TABLE messages ADD COLUMN es_comando INTEGER NOT NULL DEFAULT 0');
+  const cols = db
+    .prepare("PRAGMA table_info(messages)")
+    .all()
+    .map((c) => c.name);
+  if (!cols.includes("es_comando")) {
+    db.exec(
+      "ALTER TABLE messages ADD COLUMN es_comando INTEGER NOT NULL DEFAULT 0",
+    );
     // Lo ya guardado: se marca lo que se pueda detectar por texto.
     const marcados = db
       .prepare(
-        "UPDATE messages SET es_comando = 1 WHERE lower(trim(body)) LIKE ?"
+        "UPDATE messages SET es_comando = 1 WHERE lower(trim(body)) LIKE ?",
       )
       .run(`${util.TRIGGER}%`);
     console.log(
-      `[db] Migración: columna es_comando añadida (${marcados.changes} marcados).`
+      `[db] Migración: columna es_comando añadida (${marcados.changes} marcados).`,
     );
   }
 } catch (e) {
-  console.error('[db] Migración es_comando:', e.message);
+  console.error("[db] Migración es_comando:", e.message);
 }
 
 // Índice para las búsquedas y los recuentos por chat.
 try {
   db.exec(
-    'CREATE INDEX IF NOT EXISTS idx_msg_busqueda ON messages (chat_id, from_me, ts)'
+    "CREATE INDEX IF NOT EXISTS idx_msg_busqueda ON messages (chat_id, from_me, ts)",
   );
 } catch (_) {}
 
@@ -186,62 +202,68 @@ admins.initSchema(db);
 // Si no se configura un código de alta, se genera uno y se muestra aquí:
 // así no hay que inventarse ni configurar nada, basta con mirar los logs.
 if (!process.env.ADMIN_SETUP_CODE) {
-  process.env.ADMIN_SETUP_CODE = require('crypto')
+  process.env.ADMIN_SETUP_CODE = require("crypto")
     .randomBytes(3)
-    .toString('hex')
+    .toString("hex")
     .toUpperCase();
   console.log(
     `[admins] Código de alta de esta sesión: ${process.env.ADMIN_SETUP_CODE}\n` +
-      '         Solo hace falta si no puedo leer los admins de WhatsApp.'
+      "         Solo hace falta si no puedo leer los admins de WhatsApp.",
   );
 }
 
 // ---------- Cliente WhatsApp ----------
 const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: path.join(DATA_DIR, 'wweb-session') }),
+  authStrategy: new LocalAuth({
+    dataPath: path.join(DATA_DIR, "wweb-session"),
+  }),
   puppeteer: {
     headless: true,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
       // Ahorro moderado de recursos, sin tocar el motor JS: limitar el
       // heap de V8 aquí puede tumbar WhatsApp Web, que es pesado.
-      '--disable-extensions',
-      '--disable-background-networking',
-      '--disable-background-timer-throttling',
-      '--disable-renderer-backgrounding',
-      '--disable-accelerated-2d-canvas',
-      '--mute-audio',
+      "--disable-extensions",
+      "--disable-background-networking",
+      "--disable-background-timer-throttling",
+      "--disable-renderer-backgrounding",
+      "--disable-accelerated-2d-canvas",
+      "--mute-audio",
     ],
   },
 });
 
-client.on('qr', (qr) => {
-  console.log('\n=== Escanea este QR con el WhatsApp del número secundario ===');
-  console.log('(Ajustes → Dispositivos vinculados → Vincular dispositivo)\n');
+client.on("qr", (qr) => {
+  console.log(
+    "\n=== Escanea este QR con el WhatsApp del número secundario ===",
+  );
+  console.log("(Ajustes → Dispositivos vinculados → Vincular dispositivo)\n");
   qrcode.generate(qr, { small: true });
   // Copia en disco: útil si los logs son incómodos de leer.
   // GET http://localhost:3000/qr lo devuelve como texto.
   try {
-    fs.writeFileSync(path.join(DATA_DIR, 'last-qr.txt'), qr);
+    fs.writeFileSync(path.join(DATA_DIR, "last-qr.txt"), qr);
   } catch (_) {}
 });
 
-client.on('authenticated', () => console.log('[wa] Autenticado, sesión guardada.'));
-client.on('auth_failure', (m) => console.error('[wa] Fallo de auth:', m));
+client.on("authenticated", () =>
+  console.log("[wa] Autenticado, sesión guardada."),
+);
+client.on("auth_failure", (m) => console.error("[wa] Fallo de auth:", m));
 
-client.on('ready', () => {
-  console.log('[wa] Cliente listo y escuchando.');
+client.on("ready", () => {
+  console.log("[wa] Cliente listo y escuchando.");
   if (GROUP_IDS.length === 0) {
     console.log(
-      '[wa] GROUP_IDS vacío: capturando de TODOS los grupos. ' +
-        'Mira los logs para ver el id de tu grupo y fíjalo en .env.'
+      "[wa] GROUP_IDS vacío: capturando de TODOS los grupos. " +
+        "Mira los logs para ver el id de tu grupo y fíjalo en .env.",
     );
   } else {
-    console.log('[wa] Capturando solo los grupos:', GROUP_IDS.join(', '));
+    console.log("[wa] Capturando solo los grupos:", GROUP_IDS.join(", "));
   }
 });
 
@@ -252,7 +274,7 @@ client.on('ready', () => {
 // Reúne miembros del grupo con su nombre y su foto de perfil. Las fotos
 // dependen de la privacidad de cada usuario: si no hay, el módulo de la
 // orla dibuja un avatar con las iniciales.
-const MAX_ORLA = parseInt(process.env.ORLA_MAX_MIEMBROS || '60', 10);
+const MAX_ORLA = parseInt(process.env.ORLA_MAX_MIEMBROS || "60", 10);
 
 function nombreDesdeBD(authorId) {
   try {
@@ -260,7 +282,7 @@ function nombreDesdeBD(authorId) {
       .prepare(
         `SELECT author_name FROM messages
           WHERE author_id = ? AND author_name IS NOT NULL AND author_name != ''
-          ORDER BY ts DESC LIMIT 1`
+          ORDER BY ts DESC LIMIT 1`,
       )
       .get(authorId);
     return row ? row.author_name : null;
@@ -275,7 +297,7 @@ function mensajesPorAutor(chatId) {
     const filas = db
       .prepare(
         `SELECT author_id, COUNT(*) AS n FROM messages
-          WHERE chat_id = ? AND from_me = 0 GROUP BY author_id`
+          WHERE chat_id = ? AND from_me = 0 GROUP BY author_id`,
       )
       .all(chatId);
     for (const f of filas) cuenta.set(f.author_id, f.n);
@@ -288,12 +310,12 @@ function participantesDesdeBD(chatId) {
     return db
       .prepare(
         `SELECT DISTINCT author_id AS id FROM messages
-          WHERE chat_id = ? AND author_id IS NOT NULL AND from_me = 0`
+          WHERE chat_id = ? AND author_id IS NOT NULL AND from_me = 0`,
       )
       .all(chatId)
       .map((r) => ({ id: r.id, isAdmin: false }));
   } catch (e) {
-    console.error('[orla] Respaldo por BD falló:', e.message);
+    console.error("[orla] Respaldo por BD falló:", e.message);
     return [];
   }
 }
@@ -317,8 +339,8 @@ async function fotoComoDataUri(url, timeoutMs = 6000) {
     if (!r.ok) return null;
     const buf = Buffer.from(await r.arrayBuffer());
     if (buf.length === 0) return null;
-    const tipo = r.headers.get('content-type') || 'image/jpeg';
-    return `data:${tipo};base64,${buf.toString('base64')}`;
+    const tipo = r.headers.get("content-type") || "image/jpeg";
+    return `data:${tipo};base64,${buf.toString("base64")}`;
   } catch (e) {
     return null;
   }
@@ -337,13 +359,13 @@ async function datosOrla(chatId, sobrescrituras = {}) {
     const respaldo = participantesDesdeBD(chatId);
     if (respaldo.length === 0) {
       throw new Error(
-        'No consigo leer los miembros del grupo ahora mismo (fallo de WhatsApp Web) ' +
-          'y tampoco tengo mensajes previos de nadie en este chat.'
+        "No consigo leer los miembros del grupo ahora mismo (fallo de WhatsApp Web) " +
+          "y tampoco tengo mensajes previos de nadie en este chat.",
       );
     }
     console.log(
       `[orla] Store no disponible, uso ${respaldo.length} miembro(s) por ` +
-        'historial de mensajes.'
+        "historial de mensajes.",
     );
     g = { participantes: respaldo, subject: null };
     porRespaldo = true;
@@ -351,7 +373,7 @@ async function datosOrla(chatId, sobrescrituras = {}) {
 
   const yo = client.info && client.info.wid && client.info.wid._serialized;
   let participantes = g.participantes.filter(
-    (p) => p.id && p.id !== yo // el bot no sale en su propia orla
+    (p) => p.id && p.id !== yo, // el bot no sale en su propia orla
   );
 
   // En grupos muy grandes, los más participativos.
@@ -376,7 +398,7 @@ async function datosOrla(chatId, sobrescrituras = {}) {
     ]);
 
   const LOTE = 6;
-  const TIMEOUT_MS = parseInt(process.env.ORLA_TIMEOUT_MS || '4000', 10);
+  const TIMEOUT_MS = parseInt(process.env.ORLA_TIMEOUT_MS || "4000", 10);
   const miembros = [];
 
   for (let i = 0; i < participantes.length; i += LOTE) {
@@ -384,7 +406,7 @@ async function datosOrla(chatId, sobrescrituras = {}) {
     const resueltos = await Promise.all(
       lote.map(async (p) => {
         const id = p.id;
-        const digitos = id.split('@')[0];
+        const digitos = id.split("@")[0];
 
         // Nombre, por orden de preferencia:
         //  1) el que TÚ tienes guardado en la agenda del teléfono del bot
@@ -404,12 +426,15 @@ async function datosOrla(chatId, sobrescrituras = {}) {
         const foto = await fotoComoDataUri(url);
 
         return { id, nombre, foto, teniaUrl: !!url };
-      })
+      }),
     );
     miembros.push(...resueltos);
   }
 
-  const urlGrupo = await conTimeout(client.getProfilePicUrl(chatId), TIMEOUT_MS);
+  const urlGrupo = await conTimeout(
+    client.getProfilePicUrl(chatId),
+    TIMEOUT_MS,
+  );
   const fotoGrupo = await fotoComoDataUri(urlGrupo);
 
   const conFoto = miembros.filter((m) => m.foto).length;
@@ -418,14 +443,14 @@ async function datosOrla(chatId, sobrescrituras = {}) {
     `[orla] ${miembros.length} miembros, ${conFoto} con foto` +
       (conUrlSinBajar
         ? `, ${conUrlSinBajar} con URL que no se pudo descargar`
-        : '') +
-      (recortado ? ` (recortado a los ${MAX_ORLA} más activos)` : '')
+        : "") +
+      (recortado ? ` (recortado a los ${MAX_ORLA} más activos)` : ""),
   );
 
-  const hoy = new Date().toLocaleDateString('es-ES', {
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
+  const hoy = new Date().toLocaleDateString("es-ES", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
   });
 
   return {
@@ -433,7 +458,7 @@ async function datosOrla(chatId, sobrescrituras = {}) {
       g.subject ||
       nombresChat.get(chatId) ||
       (await nombreDelChat(null, chatId)) ||
-      'Nuestro grupo',
+      "Nuestro grupo",
     subtitulo: recortado
       ? `Los ${miembros.length} miembros más activos`
       : `${miembros.length} miembros`,
@@ -459,11 +484,13 @@ async function gruposVigilados() {
   let ids = [];
   try {
     ids = db
-      .prepare("SELECT DISTINCT chat_id FROM messages WHERE chat_id LIKE '%@g.us'")
+      .prepare(
+        "SELECT DISTINCT chat_id FROM messages WHERE chat_id LIKE '%@g.us'",
+      )
       .all()
       .map((r) => r.chat_id);
   } catch (e) {
-    console.error('[grupos] No pude listar grupos de la BD:', e.message);
+    console.error("[grupos] No pude listar grupos de la BD:", e.message);
   }
   if (GROUP_IDS.length > 0) {
     // Incluye los configurados aunque aún no tengan mensajes capturados
@@ -479,7 +506,7 @@ async function gruposVigilados() {
 function haEscritoAlgunaVez(chatId, digitos) {
   try {
     return db
-      .prepare('SELECT DISTINCT author_id FROM messages WHERE chat_id = ?')
+      .prepare("SELECT DISTINCT author_id FROM messages WHERE chat_id = ?")
       .all(chatId)
       .some((f) => util.soloDigitos(f.author_id) === digitos);
   } catch (_) {
@@ -499,7 +526,7 @@ async function gruposDelUsuario(userId) {
       const g = await grupoPorStore(chat.id);
       if (g) {
         esMiembro = g.participantes.some(
-          (p) => util.soloDigitos(p.id) === digitos
+          (p) => util.soloDigitos(p.id) === digitos,
         );
         subject = subject || g.subject;
       }
@@ -512,22 +539,20 @@ async function gruposDelUsuario(userId) {
     if (!esMiembro) esMiembro = haEscritoAlgunaVez(chat.id, digitos);
 
     if (esMiembro) {
-      salida.push({ id: chat.id, nombre: subject || 'Grupo' });
+      salida.push({ id: chat.id, nombre: subject || "Grupo" });
     }
   }
   return salida;
 }
 
 async function gruposDondeEsAdmin(userId) {
-  const digitos = String(userId).split('@')[0].replace(/\D/g, '');
+  const digitos = String(userId).split("@")[0].replace(/\D/g, "");
   const salida = [];
   for (const g of await gruposDelUsuario(userId)) {
     const admins = await adminsDelGrupo(g.id);
     if (
       Array.isArray(admins) &&
-      admins.some(
-        (a) => String(a).split('@')[0].replace(/\D/g, '') === digitos
-      )
+      admins.some((a) => String(a).split("@")[0].replace(/\D/g, "") === digitos)
     ) {
       salida.push(g);
     }
@@ -557,66 +582,143 @@ const ADMIN_TTL_MS = 10 * 60 * 1000;
  * adminsDelGrupo, datosOrla y gruposDelUsuario: los tres dejaron de
  * depender de getChatById/getChats, que es lo que falla.
  */
+/**
+ * Código que se ejecuta DENTRO de la página para sacar los datos del grupo.
+ *
+ * "sin store" en los logs significaba que window.Store no existe en el
+ * frame principal. No es raro: WhatsApp Web cambia de arquitectura a
+ * menudo (a veces la app vive en un iframe) y whatsapp-web.js inyecta sus
+ * ayudantes en sitios distintos según la versión. Por eso aquí se prueban
+ * varias vías en vez de dar una por buena.
+ */
+const LECTOR_GRUPO = `async (id) => {
+  const idDe = (i) => {
+    if (!i) return null;
+    if (typeof i === 'string') return i;
+    if (i._serialized) return i._serialized;
+    return i.user ? i.user + '@' + (i.server || 'c.us') : null;
+  };
+  const lista = (p) => {
+    if (!p) return [];
+    if (p.getModelsArray) return p.getModelsArray();
+    if (Array.isArray(p)) return p;
+    return p._models || [];
+  };
+  const salida = (models, subject, via) => ({
+    participantes: models
+      .map((x) => ({
+        id: idDe(x && x.id),
+        isAdmin: !!(x && (x.isAdmin || x.isSuperAdmin)),
+      }))
+      .filter((x) => x.id),
+    subject: subject || null,
+    total: models.length,
+    via,
+  });
+
+  const disponibles = [];
+  try {
+    // Vía 1: window.Store, la clásica.
+    const S = window.Store;
+    if (S) disponibles.push('Store');
+    if (S && S.GroupMetadata) {
+      let meta = S.GroupMetadata.get ? S.GroupMetadata.get(id) : null;
+      if ((!meta || !meta.participants) && S.GroupMetadata.find) {
+        try { meta = await S.GroupMetadata.find(id); } catch (_) {}
+      }
+      const models = lista(meta && meta.participants);
+      if (models.length > 0) {
+        const chat = S.Chat && S.Chat.get ? S.Chat.get(id) : null;
+        return salida(
+          models,
+          (meta && (meta.subject || meta.name)) ||
+            (chat && (chat.name || chat.formattedTitle)),
+          'Store.GroupMetadata'
+        );
+      }
+    }
+
+    // Vía 2: window.WWebJS, los ayudantes de la propia librería.
+    const W = window.WWebJS;
+    if (W) disponibles.push('WWebJS');
+    if (W && typeof W.getChat === 'function') {
+      try {
+        const chat = await W.getChat(id);
+        const models = lista(chat && (chat.participants || chat.groupMetadata?.participants));
+        if (models.length > 0) {
+          return salida(models, chat.name || chat.formattedTitle, 'WWebJS.getChat');
+        }
+      } catch (_) {}
+    }
+
+    // Vía 3: el chat del store, que a veces trae los metadatos dentro.
+    if (S && S.Chat && S.Chat.get) {
+      const chat = S.Chat.get(id);
+      const models = lista(chat && chat.groupMetadata && chat.groupMetadata.participants);
+      if (models.length > 0) {
+        return salida(models, chat.name || chat.formattedTitle, 'Store.Chat');
+      }
+    }
+
+    return {
+      error: 'sin datos de grupo',
+      globales: disponibles.join(',') || 'ninguno',
+    };
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  }
+}`;
+
+/** Ejecuta el lector en el frame principal y, si falla, en cada iframe. */
 async function grupoPorStore(chatId) {
   if (!client.pupPage) return null;
 
-  const res = await client.pupPage
-    .evaluate(async (id) => {
-      try {
-        const S = window.Store;
-        if (!S || !S.GroupMetadata) return { error: 'sin store' };
+  const contextos = [client.pupPage];
+  try {
+    // Si la app vive en un iframe, el frame principal no ve nada.
+    for (const f of client.pupPage.frames()) {
+      if (f !== client.pupPage.mainFrame()) contextos.push(f);
+    }
+  } catch (_) {}
 
-        let meta = S.GroupMetadata.get ? S.GroupMetadata.get(id) : null;
-        if ((!meta || !meta.participants) && S.GroupMetadata.find) {
-          meta = await S.GroupMetadata.find(id);
-        }
-        const p = meta && meta.participants;
-        if (!p) return { error: 'sin participantes' };
+  let ultimoError = null;
+  for (const ctx of contextos) {
+    const res = await ctx
+      .evaluate(LECTOR_GRUPO, chatId)
+      .catch((e) => ({ error: String((e && e.message) || e) }));
 
-        const lista = p.getModelsArray
-          ? p.getModelsArray()
-          : Array.isArray(p)
-            ? p
-            : p._models || [];
-
-        const idDe = (i) => {
-          if (!i) return null;
-          if (typeof i === 'string') return i;
-          if (i._serialized) return i._serialized;
-          return i.user ? `${i.user}@${i.server || 'c.us'}` : null;
-        };
-
-        const participantes = lista
-          .map((x) => ({
-            id: idDe(x && x.id),
-            isAdmin: !!(x && (x.isAdmin || x.isSuperAdmin)),
-          }))
-          .filter((x) => x.id);
-
-        const subject =
-          (meta && (meta.subject || meta.name)) ||
-          (S.Chat && S.Chat.get && S.Chat.get(id) && S.Chat.get(id).name) ||
-          null;
-
-        return { participantes, subject, total: lista.length };
-      } catch (e) {
-        return { error: String((e && e.message) || e) };
-      }
-    }, chatId)
-    .catch((e) => ({ error: String((e && e.message) || e) }));
-
-  if (!res || res.error) {
-    console.error(`[store] ${chatId}: ${(res && res.error) || 'sin respuesta'}`);
-    return null;
+    if (
+      res &&
+      !res.error &&
+      res.participantes &&
+      res.participantes.length > 0
+    ) {
+      console.log(
+        `[store] ${chatId}: ${res.total} miembros vía ${res.via}` +
+          (res.subject ? ` · "${res.subject}"` : ""),
+      );
+      return res;
+    }
+    ultimoError = res;
   }
-  return res;
+
+  console.error(
+    `[store] ${chatId}: ${(ultimoError && ultimoError.error) || "sin respuesta"}` +
+      (ultimoError && ultimoError.globales
+        ? ` · globales en la página: ${ultimoError.globales}`
+        : "") +
+      ` · frames probados: ${contextos.length}`,
+  );
+  return null;
 }
 
 async function adminsPorStore(chatId) {
   const g = await grupoPorStore(chatId);
   if (!g) return null;
   const admins = g.participantes.filter((p) => p.isAdmin).map((p) => p.id);
-  console.log(`[admins] Store: ${admins.length} admin(es) de ${g.total} miembros`);
+  console.log(
+    `[admins] Store: ${admins.length} admin(es) de ${g.total} miembros`,
+  );
   return admins;
 }
 
@@ -632,13 +734,14 @@ async function adminsDelGrupo(chatId, intento = 0) {
       return porStore;
     }
   } catch (e) {
-    console.error('[admins] Store falló:', e.message);
+    console.error("[admins] Store falló:", e.message);
   }
 
   // 2) Camino de la librería (por si algún día vuelve a funcionar).
   try {
     const chat = await client.getChatById(chatId);
-    if (!chat || !chat.isGroup || !Array.isArray(chat.participants)) return null;
+    if (!chat || !chat.isGroup || !Array.isArray(chat.participants))
+      return null;
 
     const ids = chat.participants
       .filter((p) => p.isAdmin || p.isSuperAdmin)
@@ -662,7 +765,7 @@ async function adminsDelGrupo(chatId, intento = 0) {
 }
 
 // Si cambian los administradores del grupo, se invalida su caché.
-client.on('group_admin_changed', (notification) => {
+client.on("group_admin_changed", (notification) => {
   try {
     const gid =
       (notification && notification.chatId) ||
@@ -688,7 +791,9 @@ async function nombreGrupoPorStore(chatId) {
         if (!S) return null;
         const chat = S.Chat && S.Chat.get ? S.Chat.get(id) : null;
         const meta =
-          S.GroupMetadata && S.GroupMetadata.get ? S.GroupMetadata.get(id) : null;
+          S.GroupMetadata && S.GroupMetadata.get
+            ? S.GroupMetadata.get(id)
+            : null;
         return (
           (chat && (chat.name || chat.formattedTitle)) ||
           (meta && meta.subject) ||
@@ -710,7 +815,7 @@ function nombreGrupoDesdeBD(chatId) {
       .prepare(
         `SELECT chat_name FROM messages
           WHERE chat_id = ? AND chat_name IS NOT NULL AND chat_name != ''
-          ORDER BY ts DESC LIMIT 1`
+          ORDER BY ts DESC LIMIT 1`,
       )
       .get(chatId);
     return f ? f.chat_name : null;
@@ -752,8 +857,8 @@ async function nombreDelChat(msg, chatId) {
 async function atenderPrivado(msg) {
   try {
     if (msg.fromMe) return; // lo que envía el propio bot
-    const from = msg.from || '';
-    if (!from.endsWith('@c.us') && !from.endsWith('@lid')) return;
+    const from = msg.from || "";
+    if (!from.endsWith("@c.us") && !from.endsWith("@lid")) return;
 
     let nombre = null;
     try {
@@ -762,7 +867,7 @@ async function atenderPrivado(msg) {
     } catch (_) {}
 
     const respuesta = await personal.handlePrivate(db, {
-      body: normalizarMencionAlBot(msg, msg.body || ''),
+      body: normalizarMencionAlBot(msg, msg.body || ""),
       userId: from,
       nombre,
       botNumber:
@@ -774,7 +879,7 @@ async function atenderPrivado(msg) {
 
     if (respuesta) await client.sendMessage(from, util.firmar(respuesta));
   } catch (err) {
-    console.error('[privado] Error:', err.stack || err);
+    console.error("[privado] Error:", err.stack || err);
   }
 }
 
@@ -798,7 +903,11 @@ async function atenderPrivado(msg) {
 function normalizarMencionAlBot(msg, textoOriginal) {
   try {
     const yo = client.info && client.info.wid && client.info.wid._serialized;
-    if (!yo || !Array.isArray(msg.mentionedIds) || msg.mentionedIds.length === 0) {
+    if (
+      !yo ||
+      !Array.isArray(msg.mentionedIds) ||
+      msg.mentionedIds.length === 0
+    ) {
       return textoOriginal;
     }
     const meMencionan = msg.mentionedIds.some((id) => util.mismoNumero(id, yo));
@@ -810,30 +919,31 @@ function normalizarMencionAlBot(msg, textoOriginal) {
       // sin tener que adivinar.
       console.log(
         `[mencion] Mención sin identificar como propia. yo=${yo} ` +
-          `mentionedIds=${msg.mentionedIds.join(',')}`
+          `mentionedIds=${msg.mentionedIds.join(",")}`,
       );
       return textoOriginal;
     }
 
-    const t = String(textoOriginal || '');
+    const t = String(textoOriginal || "");
     // Si ya empieza con el disparador en texto plano, no hay nada que
     // normalizar (lo escribieron a mano, no es una mención real).
     if (t.trim().toLowerCase().startsWith(util.TRIGGER)) return t;
 
     return t.replace(/^@\S+\s*/, `${util.TRIGGER} `);
   } catch (e) {
-    console.error('[mencion] Error normalizando:', e.message);
+    console.error("[mencion] Error normalizando:", e.message);
     return textoOriginal;
   }
 }
 
-client.on('message_create', async (msg) => {
+client.on("message_create", async (msg) => {
   // 1) Identificar el grupo SIN llamar a getChat(): el id del chat ya
   //    viene en el propio mensaje. En un grupo, uno de los dos extremos
   //    termina en @g.us (from si lo recibes, to si lo envías tú).
   let chatId = null;
   try {
-    chatId = [msg.from, msg.to].find((id) => id && id.endsWith('@g.us')) || null;
+    chatId =
+      [msg.from, msg.to].find((id) => id && id.endsWith("@g.us")) || null;
   } catch (_) {}
   if (!chatId) {
     // ---- Chat privado ----
@@ -849,16 +959,12 @@ client.on('message_create', async (msg) => {
   // escribe), el cuerpo crudo no empieza por el disparador de texto. Se
   // normaliza una sola vez y se usa tanto para guardar como para procesar
   // el comando, así el resto del bot no necesita saber nada de menciones.
-  const bodyNormalizado = normalizarMencionAlBot(msg, msg.body || '');
+  const bodyNormalizado = normalizarMencionAlBot(msg, msg.body || "");
 
   // ¿Iba dirigido al bot? Tras normalizar, cualquier orden empieza por el
   // disparador. Esto es lo que mantiene los comandos fuera de resúmenes,
   // estadísticas y GIF, aunque lleguen como mención real de WhatsApp.
-  const esComando = util
-    .norm(bodyNormalizado)
-    .startsWith(util.TRIGGER)
-    ? 1
-    : 0;
+  const esComando = util.norm(bodyNormalizado).startsWith(util.TRIGGER) ? 1 : 0;
 
   // 2) Guardar el mensaje. Aislado: si algo falla aquí, el bot todavía
   //    puede responder al comando.
@@ -873,7 +979,7 @@ client.on('message_create', async (msg) => {
       author_id: authorId,
       author_name: authorName,
       body: bodyNormalizado,
-      type: msg.type || 'chat',
+      type: msg.type || "chat",
       ts: msg.timestamp || Math.floor(Date.now() / 1000),
       captured_at: Date.now(),
       // Mensajes enviados por la propia cuenta del bot: se guardan (para
@@ -887,12 +993,12 @@ client.on('message_create', async (msg) => {
     // Log de descubrimiento: ayuda a encontrar el id del grupo y el tuyo.
     if (GROUP_IDS.length === 0) {
       console.log(
-        `[grupo] "${nombresChat.get(chatId) || '?'}" id=${chatId} ` +
-          `· autor=${authorId}`
+        `[grupo] "${nombresChat.get(chatId) || "?"}" id=${chatId} ` +
+          `· autor=${authorId}`,
       );
     }
   } catch (err) {
-    console.error('[capture] Error guardando mensaje:', err.stack || err);
+    console.error("[capture] Error guardando mensaje:", err.stack || err);
   }
 
   // 3) Comandos del bot. Con su propio try/catch y trazas completas.
@@ -907,7 +1013,8 @@ client.on('message_create', async (msg) => {
       // Datos para la orla (participantes, nombres y fotos).
       getDatosOrla: (sobrescrituras) => datosOrla(chatId, sobrescrituras),
       // Enlace a la web del calendario (solo se entrega por privado).
-      botNumber: (client.info && client.info.wid && client.info.wid.user) || null,
+      botNumber:
+        (client.info && client.info.wid && client.info.wid.user) || null,
       getEnlaceCalendario: (uid, horas) => enlaceCalendario(uid, chatId, horas),
       // Mensaje citado: permite dar de alta a alguien respondiéndole.
       citado: msg.hasQuotedMsg
@@ -917,24 +1024,24 @@ client.on('message_create', async (msg) => {
       getBrowser: () => client.pupBrowser,
     });
 
-    if (typeof reply === 'string' && reply) {
+    if (typeof reply === "string" && reply) {
       await client.sendMessage(chatId, util.firmar(reply));
     } else if (reply && reply.media) {
       // GIF/MP4 generado por @madaleno gif
       const m = reply.media;
       const media = MessageMedia.fromFilePath(m.path);
       await client.sendMessage(chatId, media, {
-        caption: util.firmar(m.caption || ''),
+        caption: util.firmar(m.caption || ""),
         // WhatsApp reproduce en bucle los MP4 enviados como "gif"
         sendVideoAsGif: !!m.isVideo,
       });
       fs.unlink(m.path, () => {}); // limpia el temporal
-      if (m.path.endsWith('.mp4')) {
-        fs.unlink(m.path.replace(/\.mp4$/, '.gif'), () => {});
+      if (m.path.endsWith(".mp4")) {
+        fs.unlink(m.path.replace(/\.mp4$/, ".gif"), () => {});
       }
     }
   } catch (err) {
-    console.error('[capture] Error respondiendo:', err.stack || err);
+    console.error("[capture] Error respondiendo:", err.stack || err);
   }
 });
 
@@ -955,14 +1062,14 @@ function serializarMsgId(msgId) {
   if (!msgId) return null;
   if (msgId._serialized) return msgId._serialized;
   if (msgId.id && msgId.remote !== undefined) {
-    return `${msgId.fromMe ? 'true' : 'false'}_${msgId.remote}_${msgId.id}`;
+    return `${msgId.fromMe ? "true" : "false"}_${msgId.remote}_${msgId.id}`;
   }
   return null;
 }
 
 // Captura de reacciones (👍❤️😂...). WhatsApp emite 'message_reaction'
 // tanto al poner como al quitar una reacción (emoji vacío = retirada).
-client.on('message_reaction', (reaction) => {
+client.on("message_reaction", (reaction) => {
   try {
     const chatId =
       (reaction.id && reaction.id.remote) || reaction.msgId?.remote || null;
@@ -975,8 +1082,8 @@ client.on('message_reaction', (reaction) => {
       // reacción: mejor descartarla que guardar una fila que colisione
       // con otras y falsee las estadísticas.
       console.error(
-        '[reacciones] Sin id de mensaje fiable, descartada:',
-        JSON.stringify(reaction).slice(0, 200)
+        "[reacciones] Sin id de mensaje fiable, descartada:",
+        JSON.stringify(reaction).slice(0, 200),
       );
       return;
     }
@@ -984,12 +1091,12 @@ client.on('message_reaction', (reaction) => {
     upsertReaction.run({
       msg_id: msgId,
       chat_id: chatId,
-      reactor_id: reaction.senderId || 'desconocido',
-      emoji: reaction.reaction || '', // '' cuando se retira
+      reactor_id: reaction.senderId || "desconocido",
+      emoji: reaction.reaction || "", // '' cuando se retira
       ts: reaction.timestamp || Math.floor(Date.now() / 1000),
     });
   } catch (err) {
-    console.error('[capture] Error guardando reacción:', err.message);
+    console.error("[capture] Error guardando reacción:", err.message);
   }
 });
 
@@ -1015,10 +1122,10 @@ let intentos = 0;
  * caso al arrancar el proceso.
  */
 function limpiarCandadosChromium() {
-  const base = path.join(DATA_DIR, 'wweb-session');
+  const base = path.join(DATA_DIR, "wweb-session");
   if (!fs.existsSync(base)) return;
 
-  const nombres = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+  const nombres = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
   let borrados = 0;
 
   const limpiarEn = (dir) => {
@@ -1043,7 +1150,7 @@ function limpiarCandadosChromium() {
       if (entrada.isDirectory()) limpiarEn(path.join(base, entrada.name));
     }
   } catch (e) {
-    console.error('[wa] No pude revisar el perfil:', e.message);
+    console.error("[wa] No pude revisar el perfil:", e.message);
   }
 
   if (borrados > 0) {
@@ -1059,13 +1166,13 @@ async function arrancarWhatsApp() {
     console.log(`[wa] Inicializando cliente (intento ${intentos + 1})...`);
     await client.initialize();
     intentos = 0;
-    console.log('[wa] Inicialización completada.');
+    console.log("[wa] Inicialización completada.");
   } catch (err) {
     intentos++;
     const espera = Math.min(60, 5 * intentos); // 5s, 10s, ... máx 60s
     console.error(
       `[wa] Fallo al inicializar (${err.message}). ` +
-        `Reintento en ${espera}s.`
+        `Reintento en ${espera}s.`,
     );
     setTimeout(() => {
       arrancando = false;
@@ -1079,8 +1186,8 @@ async function arrancarWhatsApp() {
 arrancarWhatsApp();
 
 // Si WhatsApp desconecta la sesión, reintenta en vez de quedarse muerto.
-client.on('disconnected', (motivo) => {
-  console.error('[wa] Desconectado:', motivo, '- reintentando en 15s');
+client.on("disconnected", (motivo) => {
+  console.error("[wa] Desconectado:", motivo, "- reintentando en 15s");
   setTimeout(() => {
     arrancando = false;
     arrancarWhatsApp();
@@ -1088,23 +1195,26 @@ client.on('disconnected', (motivo) => {
 });
 
 // Red de seguridad: un error asíncrono suelto no debe tumbar el bot.
-process.on('unhandledRejection', (err) => {
-  console.error('[sys] Promesa rechazada sin gestionar:', err && err.message);
+process.on("unhandledRejection", (err) => {
+  console.error("[sys] Promesa rechazada sin gestionar:", err && err.message);
 });
-process.on('uncaughtException', (err) => {
-  console.error('[sys] Excepción no capturada:', err && err.stack);
+process.on("uncaughtException", (err) => {
+  console.error("[sys] Excepción no capturada:", err && err.stack);
 });
 
 // ---- Ingesta de documentos: al estar listo y luego cada 10 min ----
-client.on('ready', () => {
+client.on("ready", () => {
   qa.ingestDocs(db, DOCS_DIR).catch((e) =>
-    console.error('[qa] Ingesta inicial falló:', e.message)
+    console.error("[qa] Ingesta inicial falló:", e.message),
   );
-  setInterval(() => {
-    qa.ingestDocs(db, DOCS_DIR).catch((e) =>
-      console.error('[qa] Reingesta falló:', e.message)
-    );
-  }, 10 * 60 * 1000);
+  setInterval(
+    () => {
+      qa.ingestDocs(db, DOCS_DIR).catch((e) =>
+        console.error("[qa] Reingesta falló:", e.message),
+      );
+    },
+    10 * 60 * 1000,
+  );
 
   // ---- Avisos diarios (cumpleaños y eventos) ----
   // Se revisan cada 15 min; el módulo solo actúa pasada la hora
@@ -1118,7 +1228,7 @@ client.on('ready', () => {
     const declarados = groups.gruposConFichero(DOCS_DIR);
     const ids = declarados.length
       ? declarados.map((g) => ({ id: g.grupoId, fichero: g.fichero }))
-      : GROUP_IDS.map((id) => ({ id, fichero: '(GROUP_IDS)' }));
+      : GROUP_IDS.map((id) => ({ id, fichero: "(GROUP_IDS)" }));
     // Si GROUP_IDS está definido, actúa como lista blanca.
     return GROUP_IDS.length > 0
       ? ids.filter((x) => GROUP_IDS.includes(x.id))
@@ -1140,7 +1250,7 @@ client.on('ready', () => {
         }
       }
     } catch (e) {
-      console.error('[avisos] Error general:', e.message);
+      console.error("[avisos] Error general:", e.message);
     }
   };
 
@@ -1150,29 +1260,29 @@ client.on('ready', () => {
 
 // ---------- API HTTP ----------
 const app = express();
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: "1mb" }));
 
 // Último QR emitido (texto plano). Útil si los logs son incómodos.
-app.get('/qr', (_req, res) => {
+app.get("/qr", (_req, res) => {
   try {
-    res.type('text/plain').send(
-      fs.readFileSync(path.join(DATA_DIR, 'last-qr.txt'), 'utf8')
-    );
+    res
+      .type("text/plain")
+      .send(fs.readFileSync(path.join(DATA_DIR, "last-qr.txt"), "utf8"));
   } catch (e) {
-    res.status(404).send('No hay QR pendiente (¿ya está vinculado?)');
+    res.status(404).send("No hay QR pendiente (¿ya está vinculado?)");
   }
 });
 
-app.get('/health', (_req, res) => {
-  res.json({ ok: true, state: client.info ? 'ready' : 'starting' });
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, state: client.info ? "ready" : "starting" });
 });
 
 // Lista de grupos conocidos (para descubrir ids cómodamente).
-app.get('/groups', (_req, res) => {
+app.get("/groups", (_req, res) => {
   const rows = db
     .prepare(
       `SELECT chat_id, chat_name, COUNT(*) AS msgs, MAX(ts) AS last_ts
-         FROM messages GROUP BY chat_id ORDER BY last_ts DESC`
+         FROM messages GROUP BY chat_id ORDER BY last_ts DESC`,
     )
     .all();
   res.json(rows);
@@ -1183,7 +1293,7 @@ app.get('/groups', (_req, res) => {
  *   GET /messages?chat_id=...&since=<epoch_s>&until=<epoch_s>
  * Si no se pasa 'since', usa las últimas 24h.
  */
-app.get('/messages', (req, res) => {
+app.get("/messages", (req, res) => {
   const nowS = Math.floor(Date.now() / 1000);
   const since = parseInt(req.query.since || nowS - 86400, 10);
   const until = parseInt(req.query.until || nowS, 10);
@@ -1193,10 +1303,10 @@ app.get('/messages', (req, res) => {
              WHERE ts >= ? AND ts <= ?`;
   const params = [since, until];
   if (chatId) {
-    sql += ' AND chat_id = ?';
+    sql += " AND chat_id = ?";
     params.push(chatId);
   }
-  sql += ' ORDER BY ts ASC';
+  sql += " ORDER BY ts ASC";
 
   const rows = db.prepare(sql).all(...params);
   res.json({ count: rows.length, since, until, messages: rows });
@@ -1207,19 +1317,19 @@ app.get('/messages', (req, res) => {
  *   POST /send  { "to": "<chat_id|self>", "text": "..." }
  * 'self' = enviártelo a ti mismo (chat contigo).
  */
-app.post('/send', async (req, res) => {
+app.post("/send", async (req, res) => {
   try {
     const { to, text } = req.body || {};
-    if (!text) return res.status(400).json({ error: 'falta text' });
+    if (!text) return res.status(400).json({ error: "falta text" });
 
     let target = to;
-    if (!target || target === 'self') {
+    if (!target || target === "self") {
       target = client.info.wid._serialized; // tu propio chat
     }
     await client.sendMessage(target, text);
     res.json({ ok: true, to: target });
   } catch (err) {
-    console.error('[send] Error:', err.message);
+    console.error("[send] Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1227,8 +1337,8 @@ app.post('/send', async (req, res) => {
 app.listen(PORT, () => console.log(`[http] API de captura en :${PORT}`));
 
 // ---------- Web del calendario (público, con enlace firmado) ----------
-const WEB_PORT = parseInt(process.env.WEB_PORT || '3001', 10);
-const WEB_BASE = process.env.WEB_BASE_URL || '';
+const WEB_PORT = parseInt(process.env.WEB_PORT || "3001", 10);
+const WEB_BASE = process.env.WEB_BASE_URL || "";
 const secretoWeb = tokens.secretoDe(db);
 
 web.arrancar({
@@ -1250,11 +1360,11 @@ web.arrancar({
       await client.sendMessage(
         chatId,
         util.firmar(
-          `🗓️ ${quien || 'Alguien'} ${accion} en el calendario: *${texto}*`
-        )
+          `🗓️ ${quien || "Alguien"} ${accion} en el calendario: *${texto}*`,
+        ),
       );
     } catch (e) {
-      console.error('[web] No pude avisar del cambio:', e.message);
+      console.error("[web] No pude avisar del cambio:", e.message);
     }
   },
   nombreDeGrupo: async (chatId) => {
@@ -1276,19 +1386,19 @@ function enlaceCalendario(userId, chatId, horas) {
   const t = tokens.crear(
     secretoWeb,
     { userId, chatId },
-    horas ? horas * 3600_000 : undefined
+    horas ? horas * 3600_000 : undefined,
   );
-  return `${WEB_BASE.replace(/\/$/, '')}/c/${encodeURIComponent(t)}`;
+  return `${WEB_BASE.replace(/\/$/, "")}/c/${encodeURIComponent(t)}`;
 }
 
 // Cierre limpio
-for (const sig of ['SIGINT', 'SIGTERM']) {
+for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, async () => {
     console.log(`\n[sys] ${sig} recibido, cerrando...`);
     // Docker concede ~10s antes del SIGKILL. Si Chromium tarda más en
     // cerrar, salimos igualmente pero dejando el perfil desbloqueado.
     const salidaForzosa = setTimeout(() => {
-      console.error('[sys] Cierre lento, forzando salida.');
+      console.error("[sys] Cierre lento, forzando salida.");
       try {
         limpiarCandadosChromium();
       } catch (_) {}
