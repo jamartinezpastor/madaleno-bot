@@ -265,6 +265,52 @@ client.on("ready", () => {
   } else {
     console.log("[wa] Capturando solo los grupos:", GROUP_IDS.join(", "));
   }
+
+  // Sonda única: deja constancia de QUÉ expone realmente la página de
+  // WhatsApp Web. Sin esto, cada fallo de lectura obliga a adivinar si
+  // falta window.Store, si cambió de nombre o si el problema es otro.
+  setTimeout(async () => {
+    try {
+      if (!client.pupPage) return;
+      const info = await client.pupPage
+        .evaluate(() => {
+          const out = { globales: [], storeKeys: [], wwebjs: [] };
+          try {
+            for (const k of [
+              "Store",
+              "WWebJS",
+              "require",
+              "webpackChunkwhatsapp_web_client",
+            ]) {
+              if (typeof window[k] !== "undefined") out.globales.push(k);
+            }
+            if (window.Store) {
+              out.storeKeys = Object.keys(window.Store).slice(0, 60);
+            }
+            if (window.WWebJS) {
+              out.wwebjs = Object.keys(window.WWebJS).slice(0, 40);
+            }
+          } catch (e) {
+            out.error = String((e && e.message) || e);
+          }
+          return out;
+        })
+        .catch((e) => ({ error: String((e && e.message) || e) }));
+
+      console.log(
+        `[sonda] Globales: ${(info.globales || []).join(", ") || "ninguno"}`,
+      );
+      if (info.storeKeys && info.storeKeys.length) {
+        console.log(`[sonda] Store expone: ${info.storeKeys.join(", ")}`);
+      }
+      if (info.wwebjs && info.wwebjs.length) {
+        console.log(`[sonda] WWebJS expone: ${info.wwebjs.join(", ")}`);
+      }
+      if (info.error) console.log(`[sonda] Error: ${info.error}`);
+    } catch (e) {
+      console.error("[sonda] Falló:", e.message);
+    }
+  }, 5000);
 });
 
 // Caché de nombres de grupo: getChat() es una llamada al WhatsApp Web
@@ -591,12 +637,12 @@ const ADMIN_TTL_MS = 10 * 60 * 1000;
  * ayudantes en sitios distintos según la versión. Por eso aquí se prueban
  * varias vías en vez de dar una por buena.
  */
-const LECTOR_GRUPO = `async (id) => {
+async function lectorGrupo(id) {
   const idDe = (i) => {
     if (!i) return null;
-    if (typeof i === 'string') return i;
+    if (typeof i === "string") return i;
     if (i._serialized) return i._serialized;
-    return i.user ? i.user + '@' + (i.server || 'c.us') : null;
+    return i.user ? i.user + "@" + (i.server || "c.us") : null;
   };
   const lista = (p) => {
     if (!p) return [];
@@ -620,11 +666,13 @@ const LECTOR_GRUPO = `async (id) => {
   try {
     // Vía 1: window.Store, la clásica.
     const S = window.Store;
-    if (S) disponibles.push('Store');
+    if (S) disponibles.push("Store");
     if (S && S.GroupMetadata) {
       let meta = S.GroupMetadata.get ? S.GroupMetadata.get(id) : null;
       if ((!meta || !meta.participants) && S.GroupMetadata.find) {
-        try { meta = await S.GroupMetadata.find(id); } catch (_) {}
+        try {
+          meta = await S.GroupMetadata.find(id);
+        } catch (_) {}
       }
       const models = lista(meta && meta.participants);
       if (models.length > 0) {
@@ -633,20 +681,26 @@ const LECTOR_GRUPO = `async (id) => {
           models,
           (meta && (meta.subject || meta.name)) ||
             (chat && (chat.name || chat.formattedTitle)),
-          'Store.GroupMetadata'
+          "Store.GroupMetadata",
         );
       }
     }
 
     // Vía 2: window.WWebJS, los ayudantes de la propia librería.
     const W = window.WWebJS;
-    if (W) disponibles.push('WWebJS');
-    if (W && typeof W.getChat === 'function') {
+    if (W) disponibles.push("WWebJS");
+    if (W && typeof W.getChat === "function") {
       try {
         const chat = await W.getChat(id);
-        const models = lista(chat && (chat.participants || chat.groupMetadata?.participants));
+        const models = lista(
+          chat && (chat.participants || chat.groupMetadata?.participants),
+        );
         if (models.length > 0) {
-          return salida(models, chat.name || chat.formattedTitle, 'WWebJS.getChat');
+          return salida(
+            models,
+            chat.name || chat.formattedTitle,
+            "WWebJS.getChat",
+          );
         }
       } catch (_) {}
     }
@@ -654,20 +708,22 @@ const LECTOR_GRUPO = `async (id) => {
     // Vía 3: el chat del store, que a veces trae los metadatos dentro.
     if (S && S.Chat && S.Chat.get) {
       const chat = S.Chat.get(id);
-      const models = lista(chat && chat.groupMetadata && chat.groupMetadata.participants);
+      const models = lista(
+        chat && chat.groupMetadata && chat.groupMetadata.participants,
+      );
       if (models.length > 0) {
-        return salida(models, chat.name || chat.formattedTitle, 'Store.Chat');
+        return salida(models, chat.name || chat.formattedTitle, "Store.Chat");
       }
     }
 
     return {
-      error: 'sin datos de grupo',
-      globales: disponibles.join(',') || 'ninguno',
+      error: "sin datos de grupo",
+      globales: disponibles.join(",") || "ninguno",
     };
   } catch (e) {
     return { error: String((e && e.message) || e) };
   }
-}`;
+}
 
 /** Ejecuta el lector en el frame principal y, si falla, en cada iframe. */
 async function grupoPorStore(chatId) {
@@ -684,7 +740,7 @@ async function grupoPorStore(chatId) {
   let ultimoError = null;
   for (const ctx of contextos) {
     const res = await ctx
-      .evaluate(LECTOR_GRUPO, chatId)
+      .evaluate(lectorGrupo, chatId)
       .catch((e) => ({ error: String((e && e.message) || e) }));
 
     if (

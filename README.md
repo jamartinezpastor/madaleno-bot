@@ -1,6 +1,6 @@
 # Madaleno Bot
 
-<img src="data/madaleno-bot-small.png" alt="Madaleno Bot" width="96">
+<img src="img/madaleno-bot-small.png" alt="Madaleno Bot" width="96">
 
 Bot de WhatsApp para grupos: resúmenes en texto y GIF, estadísticas,
 calendario con avisos automáticos, orla del grupo y respuestas sobre el
