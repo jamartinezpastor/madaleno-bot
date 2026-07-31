@@ -103,7 +103,7 @@ function mensajesDesde(db, chatId, desde) {
     .prepare(
       `SELECT author_name, author_id, body, ts FROM messages
         WHERE chat_id = ? AND ts >= ? AND body != '' AND ${util.SQL_CON_CONTENIDO}
-          AND from_me = 0 AND lower(trim(body)) NOT LIKE ?
+          AND from_me = 0 AND es_comando = 0 AND lower(trim(body)) NOT LIKE ?
         ORDER BY ts ASC`
     )
     .all(chatId, desde, `${TRIGGER}%`);

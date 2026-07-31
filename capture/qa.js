@@ -82,7 +82,11 @@ async function ingestDocs(_db, docsDir) {
 // del grupo: se excluyen los mensajes dirigidos al bot ("@madaleno ...")
 // y las respuestas del propio bot, que si no se retroalimentan.
 const TRIGGER_LIKE = BOT_TRIGGER.toLowerCase() + '%';
-const SIN_RUIDO = `AND from_me = 0 AND lower(trim(body)) NOT LIKE ?`;
+// Fuera del análisis: lo que envía el propio bot y las órdenes que le dan
+// los usuarios. es_comando cubre también las menciones reales de WhatsApp,
+// que no empiezan por el disparador en texto.
+const SIN_RUIDO =
+  `AND from_me = 0 AND es_comando = 0 AND lower(trim(body)) NOT LIKE ?`;
 
 function recentMessages(db, chatId, limit = 50) {
   return util
@@ -207,30 +211,20 @@ function computeStats(db, chatId) {
  * Se genera de la configuración real, no de lo que suponga nadie.
  */
 function lineaSeguridad() {
-  const partes = [];
-
-  // Estado REAL del fichero, no la simple presencia de DB_KEY: una
-  // variable de entorno dice lo que pretendes, no lo que hay en disco.
   const cifrada = baseDatos.estaCifrada();
-  if (cifrada === true) {
-    partes.push('historial cifrado en el servidor (AES-256)');
-  } else if (cifrada === false) {
-    partes.push(
-      process.env.DB_KEY
-        ? '⚠️ DB_KEY configurada pero el historial NO está cifrado'
-        : 'historial sin cifrar en el servidor'
-    );
-  } else {
-    partes.push('estado del cifrado no verificable');
-  }
 
-  if (String(process.env.WEB_LINK_EN_GRUPO || '').toLowerCase() === 'true') {
-    partes.push('enlace de edición visible en el grupo');
-  }
+  // Texto exacto pedido cuando todo está como debe estar. Si NO lo está,
+  // no se dice que sí: avisar es justo el motivo de tener esta línea.
+  const estado =
+    cifrada === true
+      ? '🔒 Historial cifrado (AES-256)'
+      : cifrada === false
+        ? process.env.DB_KEY
+          ? '⚠️ DB_KEY configurada pero el historial NO está cifrado'
+          : '⚠️ Historial sin cifrar'
+        : '🔒 Estado del cifrado no verificable';
 
-  partes.push(`Modelo IA: ${gemini.MODEL}`);
-
-  return `_🔒 ${partes.join(' · ')}._`;
+  return `${estado} · Modelo IA: ${gemini.MODEL}`;
 }
 
 async function infoReport(db, chatId) {
@@ -241,34 +235,35 @@ async function infoReport(db, chatId) {
 
   const lineas = [];
   lineas.push('*Info del grupo* (Últimas semanas)');
-  lineas.push(`*Mensajes*: ${s.totalMsgs} · (${s.porDia} al día)`);
+  lineas.push('━━━━━━━━━━━━━━━');
+  lineas.push(`• *Mensajes*: ${s.totalMsgs} · (${s.porDia} al día)`);
   if (s.topEmoji) {
-    lineas.push(`*Emoji estrella*: ${s.topEmoji[0]} (${s.topEmoji[1]} veces)`);
+    lineas.push(`• *Emoji estrella*: ${s.topEmoji[0]} (${s.topEmoji[1]} veces)`);
   }
   lineas.push(
-    '*Top escritores*: ' +
+    '• *Top escritores*: ' +
       s.topUsers.map(([n, c], i) => `${i + 1}. ${n} (${c})`).join(' · ')
   );
   if (s.mostReacted && s.mostReacted.name) {
     lineas.push(
-      `*Más reacciones recibidas*: ${s.mostReacted.name} (${s.mostReacted.n})`
+      `• *Más reacciones recibidas*: ${s.mostReacted.name} (${s.mostReacted.n})`
     );
   } else {
-    lineas.push('*Reacciones*: aún no hay datos suficientes');
+    lineas.push('• *Reacciones*: aún no hay datos suficientes');
   }
   if (s.topReactor) {
-    lineas.push(`*Quien más reacciona*: ${s.topReactor.name} (${s.topReactor.n})`);
+    lineas.push(`• *Quien más reacciona*: ${s.topReactor.name} (${s.topReactor.n})`);
   }
-  lineas.push(`*Hora más activa*: sobre las ${s.hottestHour}:00`);
+  lineas.push(`• *Hora más activa*: sobre las ${s.hottestHour}:00`);
 
   let llmPart = '';
   try {
     llmPart = await gemini.generate(
       'Analizas la conversación reciente de un grupo de WhatsApp. ' +
         'Responde en español, MUY breve, exactamente en este formato ' +
-        '(respeta los asteriscos, son negrita de WhatsApp):\n' +
-        '*Temas*: <3-4 temas como #hashtag, separados por espacios>\n' +
-        '*Curiosidad*: <un dato sobre la conversación en 1 frase, con ' +
+        '(respeta los asteriscos y el punto inicial):\n' +
+        '• *Temas*: <3-4 temas como #hashtag, separados por espacios>\n' +
+        '• *Curiosidad*: <un dato sobre la conversación en 1 frase, con ' +
         'tono sarcástico e irónico, sin llegar a ser cruel>\n' +
         'No empieces las líneas con emojis. No inventes; básate solo en ' +
         'lo que veas.',
@@ -277,7 +272,7 @@ async function infoReport(db, chatId) {
     );
   } catch (e) {
     console.error('[qa] info: parte IA falló:', e.message);
-    llmPart = '*Temas*: (no disponible ahora mismo)';
+    llmPart = '• *Temas*: (no disponible ahora mismo)';
   }
 
   return lineas.join('\n') + '\n' + llmPart + '\n\n' + lineaSeguridad();
@@ -678,16 +673,17 @@ async function handleIncoming(
   // si se escriben directamente: están en stand-by, ocultos de la ayuda
   // mientras se pulen.
   const AYUDA =
-    '🤖 *Madaleno Bot*\n\n' +
-    `Escríbeme en el grupo con ${BOT_TRIGGER} seguido de un comando.\n` +
-    `Sin comando (solo ${BOT_TRIGGER}) verás esta lista.\n\n` +
+    '🤖 *Madaleno Bot*\n' +
+    '━━━━━━━━━━━━━━━\n' +
+    `Escribe ${BOT_TRIGGER} seguido de un comando.\n` +
+    `Sin comando (solo ${BOT_TRIGGER}) verás este mensaje de ayuda.\n\n` +
     '• `resumen`\n' +
     '• `info`\n' +
     '• `gif`\n' +
     '• `orla`\n' +
-    '• `miresumen` — escríbemelo *por privado*, no aquí: te cuento solo ' +
-    'lo que te afecta a ti. Añade `semana` para 7 días.\n' +
-    '• `ayuda` / `help` / `?`';
+    '• `miresumen` (escríbeme *por privado*, no en un grupo) te cuento ' +
+    'solo lo que te afecta a ti. Añade `semana` para 7 días.\n' +
+    `• \`ayuda\` / \`help\` / \`${BOT_TRIGGER}\` / \`?\``;
 
   if (!rest) return AYUDA;
 
@@ -833,6 +829,20 @@ async function handleIncoming(
         return 'Dime qué busco: `@madaleno busca <palabras>`';
       }
       return await informeBusqueda(db, chatId, consulta);
+    }
+
+    // miresumen es de chat privado: aquí solo se invita a usarlo allí.
+    // Tiene sentido: cuenta cosas dirigidas a UNA persona, no al grupo.
+    if (/^(miresumen|mi resumen)/.test(lower)) {
+      const url = botNumber
+        ? `https://wa.me/${String(botNumber).replace(/\D/g, '')}?text=${encodeURIComponent(BOT_TRIGGER + ' miresumen')}`
+        : null;
+      return (
+        '👋 Ese te lo cuento *por privado*, que es solo para ti.\n' +
+        (url
+          ? `Pulsa y envía: ${url}`
+          : `Escríbeme por privado: ${BOT_TRIGGER} miresumen`)
+      );
     }
 
     if (/^orla/.test(lower)) {

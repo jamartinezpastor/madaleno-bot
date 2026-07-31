@@ -53,7 +53,8 @@ db.exec(`
     ts           INTEGER NOT NULL,        -- epoch segundos (hora del mensaje)
     captured_at  INTEGER NOT NULL,        -- epoch ms (cuándo lo guardamos)
     from_me      INTEGER NOT NULL DEFAULT 0, -- 1 = lo envió el propio bot
-    body_norm    TEXT                        -- body en minúsculas y sin tildes
+    body_norm    TEXT,                       -- body en minúsculas y sin tildes
+    es_comando   INTEGER NOT NULL DEFAULT 0  -- 1 = mensaje dirigido al bot
   );
   CREATE INDEX IF NOT EXISTS idx_chat_ts ON messages (chat_id, ts);
 
@@ -137,6 +138,28 @@ function purgarAntiguos() {
 }
 purgarAntiguos();
 setInterval(purgarAntiguos, 24 * 3600 * 1000);
+
+// Migración: es_comando marca los mensajes dirigidos al bot. Detectar
+// esto por texto no basta: si alguien usa la mención real de WhatsApp, el
+// cuerpo llega como "@<id> comando" y se colaba en resúmenes y
+// estadísticas. Al capturar sí sabemos si el mensaje era para el bot.
+try {
+  const cols = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
+  if (!cols.includes('es_comando')) {
+    db.exec('ALTER TABLE messages ADD COLUMN es_comando INTEGER NOT NULL DEFAULT 0');
+    // Lo ya guardado: se marca lo que se pueda detectar por texto.
+    const marcados = db
+      .prepare(
+        "UPDATE messages SET es_comando = 1 WHERE lower(trim(body)) LIKE ?"
+      )
+      .run(`${util.TRIGGER}%`);
+    console.log(
+      `[db] Migración: columna es_comando añadida (${marcados.changes} marcados).`
+    );
+  }
+} catch (e) {
+  console.error('[db] Migración es_comando:', e.message);
+}
 
 // Índice para las búsquedas y los recuentos por chat.
 try {
@@ -275,6 +298,32 @@ function participantesDesdeBD(chatId) {
   }
 }
 
+/**
+ * Descarga una foto de perfil y la convierte en data URI.
+ *
+ * Antes se pasaba la URL al HTML y era el navegador quien la descargaba
+ * al renderizar: si tardaba o fallaba (CDN de WhatsApp, red del
+ * contenedor, caducidad del enlace), la foto simplemente no aparecía y
+ * salía el avatar de iniciales sin explicación. Bajándola aquí sabemos si
+ * funcionó, se puede registrar, y el render ya no depende de la red.
+ */
+async function fotoComoDataUri(url, timeoutMs = 6000) {
+  if (!url) return null;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const r = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length === 0) return null;
+    const tipo = r.headers.get('content-type') || 'image/jpeg';
+    return `data:${tipo};base64,${buf.toString('base64')}`;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function datosOrla(chatId, sobrescrituras = {}) {
   // El nombre del grupo y sus participantes se leen del store
   // (grupoPorStore), no de getChatById (misma llamada rota que ya dio
@@ -351,22 +400,25 @@ async function datosOrla(chatId, sobrescrituras = {}) {
 
         // Sin foto accesible (privacidad o timeout) se usa el avatar de
         // iniciales, que ya contempla el módulo de la orla.
-        const foto = await conTimeout(client.getProfilePicUrl(id), TIMEOUT_MS);
+        const url = await conTimeout(client.getProfilePicUrl(id), TIMEOUT_MS);
+        const foto = await fotoComoDataUri(url);
 
-        return { id, nombre, foto };
+        return { id, nombre, foto, teniaUrl: !!url };
       })
     );
     miembros.push(...resueltos);
   }
 
-  const fotoGrupo = await conTimeout(
-    client.getProfilePicUrl(chatId),
-    TIMEOUT_MS
-  );
+  const urlGrupo = await conTimeout(client.getProfilePicUrl(chatId), TIMEOUT_MS);
+  const fotoGrupo = await fotoComoDataUri(urlGrupo);
 
   const conFoto = miembros.filter((m) => m.foto).length;
+  const conUrlSinBajar = miembros.filter((m) => m.teniaUrl && !m.foto).length;
   console.log(
     `[orla] ${miembros.length} miembros, ${conFoto} con foto` +
+      (conUrlSinBajar
+        ? `, ${conUrlSinBajar} con URL que no se pudo descargar`
+        : '') +
       (recortado ? ` (recortado a los ${MAX_ORLA} más activos)` : '')
   );
 
@@ -377,7 +429,11 @@ async function datosOrla(chatId, sobrescrituras = {}) {
   });
 
   return {
-    titulo: g.subject || nombresChat.get(chatId) || 'Nuestro grupo',
+    titulo:
+      g.subject ||
+      nombresChat.get(chatId) ||
+      (await nombreDelChat(null, chatId)) ||
+      'Nuestro grupo',
     subtitulo: recortado
       ? `Los ${miembros.length} miembros más activos`
       : `${miembros.length} miembros`,
@@ -618,16 +674,78 @@ client.on('group_admin_changed', (notification) => {
   } catch (_) {}
 });
 
-async function nombreDelChat(msg, chatId) {
-  if (nombresChat.has(chatId)) return nombresChat.get(chatId);
-  let nombre = null;
+/**
+ * Nombre del grupo sin usar getChat(), que falla ("Puppeteer error r: r").
+ * Se prueban varias fuentes del almacén interno porque no todas las
+ * versiones de WhatsApp Web guardan el título en el mismo sitio.
+ */
+async function nombreGrupoPorStore(chatId) {
+  if (!client.pupPage) return null;
+  const res = await client.pupPage
+    .evaluate((id) => {
+      try {
+        const S = window.Store;
+        if (!S) return null;
+        const chat = S.Chat && S.Chat.get ? S.Chat.get(id) : null;
+        const meta =
+          S.GroupMetadata && S.GroupMetadata.get ? S.GroupMetadata.get(id) : null;
+        return (
+          (chat && (chat.name || chat.formattedTitle)) ||
+          (meta && meta.subject) ||
+          (chat && chat.contact && chat.contact.name) ||
+          null
+        );
+      } catch (_) {
+        return null;
+      }
+    }, chatId)
+    .catch(() => null);
+  return res || null;
+}
+
+/** Último nombre conocido del grupo guardado en la base de datos. */
+function nombreGrupoDesdeBD(chatId) {
   try {
-    const chat = await msg.getChat();
-    nombre = (chat && chat.name) || null;
-  } catch (e) {
-    console.error(`[capture] No pude leer el nombre del chat (${e.message})`);
+    const f = db
+      .prepare(
+        `SELECT chat_name FROM messages
+          WHERE chat_id = ? AND chat_name IS NOT NULL AND chat_name != ''
+          ORDER BY ts DESC LIMIT 1`
+      )
+      .get(chatId);
+    return f ? f.chat_name : null;
+  } catch (_) {
+    return null;
   }
-  nombresChat.set(chatId, nombre);
+}
+
+async function nombreDelChat(msg, chatId) {
+  const cacheado = nombresChat.get(chatId);
+  if (cacheado) return cacheado; // solo si es un nombre real, no null
+
+  let nombre = null;
+  // 1) Store interno: no depende de getChat(), que está roto.
+  try {
+    nombre = await nombreGrupoPorStore(chatId);
+  } catch (_) {}
+
+  // 2) getChat() por si acaso funciona en esta versión.
+  if (!nombre && msg) {
+    try {
+      const chat = await msg.getChat();
+      nombre = (chat && chat.name) || null;
+    } catch (e) {
+      console.error(`[capture] getChat no disponible (${e.message})`);
+    }
+  }
+
+  // 3) El último nombre que llegamos a guardar alguna vez.
+  if (!nombre) nombre = nombreGrupoDesdeBD(chatId);
+
+  if (nombre) {
+    nombresChat.set(chatId, nombre);
+    console.log(`[grupo] Nombre resuelto: "${nombre}" (${chatId})`);
+  }
   return nombre;
 }
 
@@ -733,6 +851,15 @@ client.on('message_create', async (msg) => {
   // el comando, así el resto del bot no necesita saber nada de menciones.
   const bodyNormalizado = normalizarMencionAlBot(msg, msg.body || '');
 
+  // ¿Iba dirigido al bot? Tras normalizar, cualquier orden empieza por el
+  // disparador. Esto es lo que mantiene los comandos fuera de resúmenes,
+  // estadísticas y GIF, aunque lleguen como mención real de WhatsApp.
+  const esComando = util
+    .norm(bodyNormalizado)
+    .startsWith(util.TRIGGER)
+    ? 1
+    : 0;
+
   // 2) Guardar el mensaje. Aislado: si algo falla aquí, el bot todavía
   //    puede responder al comando.
   try {
@@ -754,6 +881,7 @@ client.on('message_create', async (msg) => {
       // estadísticas y GIF, porque son ruido generado por él mismo.
       from_me: msg.fromMe ? 1 : 0,
       body_norm: util.norm(bodyNormalizado),
+      es_comando: esComando,
     });
 
     // Log de descubrimiento: ayuda a encontrar el id del grupo y el tuyo.
