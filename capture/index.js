@@ -981,10 +981,25 @@ function normalizarMencionAlBot(msg, textoOriginal) {
     }
 
     const t = String(textoOriginal || "");
-    // Si ya empieza con el disparador en texto plano, no hay nada que
-    // normalizar (lo escribieron a mano, no es una mención real).
-    if (t.trim().toLowerCase().startsWith(util.TRIGGER)) return t;
+    // Si el texto plano ya deja ver el disparador (al principio o suelto
+    // en medio de la frase), no hay nada que normalizar: lo escribieron a
+    // mano, no es una mención real.
+    if (util.detectarMencion(t) != null) return t;
 
+    // Sustituye SOLO el token que corresponde al bot (su número), esté
+    // donde esté en la frase — no el primer "@algo" a ciegas, que podría
+    // ser la mención a otra persona.
+    const digitos = util.soloDigitos(yo);
+    if (digitos) {
+      const tokenPropio = new RegExp("@" + digitos + "\\b");
+      if (tokenPropio.test(t)) {
+        return t.replace(tokenPropio, util.TRIGGER).trim();
+      }
+    }
+
+    // Formato no reconocido (posible LID, ver log de arriba): si al menos
+    // el mensaje empieza por una mención, se sustituye igual para no
+    // perder el comando.
     return t.replace(/^@\S+\s*/, `${util.TRIGGER} `);
   } catch (e) {
     console.error("[mencion] Error normalizando:", e.message);
@@ -1017,10 +1032,11 @@ client.on("message_create", async (msg) => {
   // el comando, así el resto del bot no necesita saber nada de menciones.
   const bodyNormalizado = normalizarMencionAlBot(msg, msg.body || "");
 
-  // ¿Iba dirigido al bot? Tras normalizar, cualquier orden empieza por el
-  // disparador. Esto es lo que mantiene los comandos fuera de resúmenes,
-  // estadísticas y GIF, aunque lleguen como mención real de WhatsApp.
-  const esComando = util.norm(bodyNormalizado).startsWith(util.TRIGGER) ? 1 : 0;
+  // ¿Iba dirigido al bot? El disparador puede estar al principio o suelto
+  // en medio de la frase ("oye @madaleno, ¿qué tal?"). Esto es lo que
+  // mantiene los comandos fuera de resúmenes, estadísticas y GIF, aunque
+  // lleguen como mención real de WhatsApp o mencionen al bot a media frase.
+  const esComando = util.detectarMencion(bodyNormalizado) != null ? 1 : 0;
 
   // 2) Guardar el mensaje. Aislado: si algo falla aquí, el bot todavía
   //    puede responder al comando.

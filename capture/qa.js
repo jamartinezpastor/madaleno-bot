@@ -640,13 +640,15 @@ async function handleIncoming(
   }
 ) {
   if (!body) return null;
-  const trimmed = body.trim();
-  if (!trimmed.toLowerCase().startsWith(BOT_TRIGGER)) return null;
+  // Detecta el disparador en cualquier punto del mensaje ("oye @madaleno,
+  // ¿qué tal?"), no solo al principio: así una mención suelta en medio de
+  // una frase también se analiza como comando o pregunta.
+  const rest = util.detectarMencion(body);
+  if (rest == null) return null;
 
   // Datos de ESTE grupo: los comunes + los de su CSV (si lo tiene).
   const cfg = groups.paraChat(docsDir, chatId);
 
-  const rest = trimmed.slice(BOT_TRIGGER.length).trim();
   const lower = norm(rest);
 
   // Todos los comandos son accesibles a cualquier miembro del grupo, sea
