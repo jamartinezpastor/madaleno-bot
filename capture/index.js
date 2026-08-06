@@ -923,7 +923,7 @@ async function atenderPrivado(msg) {
     } catch (_) {}
 
     const respuesta = await personal.handlePrivate(db, {
-      body: normalizarMencionAlBot(msg, msg.body || ""),
+      body: await normalizarMencionAlBot(msg, msg.body || ""),
       userId: from,
       nombre,
       botNumber:
@@ -951,55 +951,68 @@ async function atenderPrivado(msg) {
  * SOLO para quien tiene el contacto guardado, sea cual sea la
  * mayúscula/minúscula usada — no es un problema de mayúsculas.
  *
- * Aquí se detecta esa mención real (msg.mentionedIds incluye al propio
- * bot) y se sustituye el primer token "@algo" por el disparador
- * configurado, para que el resto del bot vea siempre lo mismo que si se
- * hubiera escrito a mano.
+ * Aquí se detecta esa mención real resolviendo los Contact de
+ * msg.getMentions() y comprobando isMe (no comparando ids en bruto, que
+ * falla si mentionedIds usa LID y client.info.wid el número clásico) y se
+ * sustituye el token de mención propio por el disparador configurado,
+ * esté donde esté en la frase, para que el resto del bot vea siempre lo
+ * mismo que si se hubiera escrito a mano.
  */
-function normalizarMencionAlBot(msg, textoOriginal) {
+async function normalizarMencionAlBot(msg, textoOriginal) {
   try {
-    const yo = client.info && client.info.wid && client.info.wid._serialized;
-    if (
-      !yo ||
-      !Array.isArray(msg.mentionedIds) ||
-      msg.mentionedIds.length === 0
-    ) {
-      return textoOriginal;
-    }
-    const meMencionan = msg.mentionedIds.some((id) => util.mismoNumero(id, yo));
-    if (!meMencionan) {
-      // Diagnóstico: si esto sale con frecuencia y el mensaje va dirigido
-      // claramente al bot, es probable que mentionedIds use un formato
-      // (LID) distinto al de client.info.wid (número clásico), y esta
-      // normalización no podría detectarlo. Este log ayuda a confirmarlo
-      // sin tener que adivinar.
-      console.log(
-        `[mencion] Mención sin identificar como propia. yo=${yo} ` +
-          `mentionedIds=${msg.mentionedIds.join(",")}`,
-      );
-      return textoOriginal;
-    }
-
     const t = String(textoOriginal || "");
     // Si el texto plano ya deja ver el disparador (al principio o suelto
     // en medio de la frase), no hay nada que normalizar: lo escribieron a
     // mano, no es una mención real.
     if (util.detectarMencion(t) != null) return t;
 
-    // Sustituye SOLO el token que corresponde al bot (su número), esté
+    if (!Array.isArray(msg.mentionedIds) || msg.mentionedIds.length === 0) {
+      return textoOriginal;
+    }
+
+    // Se resuelve con los Contact reales (msg.getMentions()) en vez de
+    // comparar el id crudo contra client.info.wid: desde que WhatsApp usa
+    // LID además del número clásico, mentionedIds puede venir en un
+    // formato distinto al de client.info.wid aunque el mencionado seas tú
+    // (comparar dígitos entonces no coincide nunca). Contact.isMe lo
+    // resuelve el propio WhatsApp Web, así que no depende de qué formato
+    // de id se use ese día.
+    let contactos = [];
+    try {
+      contactos = await msg.getMentions();
+    } catch (e) {
+      console.error(
+        "[mencion] No se pudieron resolver los contactos mencionados:",
+        e.message,
+      );
+    }
+    const yoMencionado = contactos.find((c) => c && c.isMe);
+
+    if (!yoMencionado) {
+      // Diagnóstico: si esto sale con frecuencia y el mensaje va dirigido
+      // claramente al bot, ni siquiera getMentions() lo identifica como
+      // "yo" — revisar aquí primero antes de tocar nada más.
+      console.log(
+        `[mencion] Mención sin identificar como propia. ` +
+          `mentionedIds=${msg.mentionedIds.join(",")}`,
+      );
+      return textoOriginal;
+    }
+
+    // El token que aparece en el texto crudo es "@" + la parte de usuario
+    // del id tal como WhatsApp lo mencionó (número clásico o LID), esté
     // donde esté en la frase — no el primer "@algo" a ciegas, que podría
     // ser la mención a otra persona.
-    const digitos = util.soloDigitos(yo);
-    if (digitos) {
-      const tokenPropio = new RegExp("@" + digitos + "\\b");
+    const token = yoMencionado.id && yoMencionado.id.user;
+    if (token) {
+      const tokenPropio = new RegExp("@" + token + "\\b");
       if (tokenPropio.test(t)) {
         return t.replace(tokenPropio, util.TRIGGER).trim();
       }
     }
 
-    // Formato no reconocido (posible LID, ver log de arriba): si al menos
-    // el mensaje empieza por una mención, se sustituye igual para no
-    // perder el comando.
+    // Formato inesperado: si al menos el mensaje empieza por una mención,
+    // se sustituye igual para no perder el comando.
     return t.replace(/^@\S+\s*/, `${util.TRIGGER} `);
   } catch (e) {
     console.error("[mencion] Error normalizando:", e.message);
@@ -1030,7 +1043,7 @@ client.on("message_create", async (msg) => {
   // escribe), el cuerpo crudo no empieza por el disparador de texto. Se
   // normaliza una sola vez y se usa tanto para guardar como para procesar
   // el comando, así el resto del bot no necesita saber nada de menciones.
-  const bodyNormalizado = normalizarMencionAlBot(msg, msg.body || "");
+  const bodyNormalizado = await normalizarMencionAlBot(msg, msg.body || "");
 
   // ¿Iba dirigido al bot? El disparador puede estar al principio o suelto
   // en medio de la frase ("oye @madaleno, ¿qué tal?"). Esto es lo que
