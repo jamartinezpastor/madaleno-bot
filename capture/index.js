@@ -307,10 +307,6 @@ client.on("ready", () => {
         console.log(`[sonda] WWebJS expone: ${info.wwebjs.join(", ")}`);
       }
       if (info.error) console.log(`[sonda] Error: ${info.error}`);
-
-      // Si la sonda confirma que no hay Store, se levanta ahora mismo en
-      // vez de esperar a que falle la primera orla.
-      await asegurarStore(true);
     } catch (e) {
       console.error("[sonda] Falló:", e.message);
     }
@@ -336,38 +332,6 @@ function nombreDesdeBD(authorId) {
       )
       .get(authorId);
     return row ? row.author_name : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-/**
- * Nombre reconocible para un grupo cuyo título no conseguimos leer.
- *
- * Un "Grupo ...1234" no lo distingue nadie: el id no significa nada para
- * una persona. Con quién hablas en él, sí. La base de datos ya sabe quién
- * escribe en cada chat, así que se nombra por sus voces más habituales.
- * Es un último recurso: si el título real aparece, manda el título.
- */
-function nombreHumanoDeGrupo(chatId) {
-  try {
-    const filas = db
-      .prepare(
-        `SELECT author_name, COUNT(*) AS n FROM messages
-          WHERE chat_id = ? AND from_me = 0
-            AND author_name IS NOT NULL AND author_name != ''
-          GROUP BY author_id ORDER BY n DESC LIMIT 3`,
-      )
-      .all(chatId);
-    const nombres = filas
-      .map((f) => String(f.author_name).trim().split(/\s+/)[0])
-      .filter(Boolean);
-    if (nombres.length === 0) return null;
-    if (nombres.length === 1) return `Grupo con ${nombres[0]}`;
-    return (
-      `Grupo con ${nombres.slice(0, -1).join(", ")} ` +
-      `y ${nombres[nombres.length - 1]}`
-    );
   } catch (_) {
     return null;
   }
@@ -411,6 +375,135 @@ function participantesDesdeBD(chatId) {
  * salía el avatar de iniciales sin explicación. Bajándola aquí sabemos si
  * funcionó, se puede registrar, y el render ya no depende de la red.
  */
+/**
+ * Foto de perfil pedida a la propia página, que ya la tiene descargada y
+ * autenticada. Es más fiable que bajarla del CDN por URL: WhatsApp firma
+ * esos enlaces y desde el contenedor caducan o se rechazan (de ahí el
+ * "0 con foto" de los logs). La sonda confirmó que WWebJS expone
+ * getProfilePicThumbToBase64.
+ */
+/**
+ * Foto de perfil (contacto o grupo) obtenida DENTRO de la página.
+ *
+ * Se prueban varias vías porque ninguna es fiable por sí sola en esta
+ * instalación: window.Store no existe, así que el ayudante
+ * getProfilePicThumbToBase64 de la librería (que lo usa por dentro)
+ * puede fallar. La última vía es la más robusta: sacar la URL del módulo
+ * interno y descargarla desde la propia página, que ya está autenticada
+ * con WhatsApp; hacerlo desde Node falla porque esos enlaces van firmados.
+ */
+async function fotoPorPagina(id) {
+  if (!client.pupPage) return null;
+
+  const b64 = await client.pupPage
+    .evaluate(async (wid) => {
+      const req = (n) => {
+        try {
+          return typeof window.require === "function"
+            ? window.require(n)
+            : null;
+        } catch (e) {
+          return null;
+        }
+      };
+      const col = (m, p) => (m ? m[p] || m.default || null : null);
+
+      const aBase64 = async (url) => {
+        try {
+          if (!url) return null;
+          const r = await fetch(url);
+          if (!r.ok) return null;
+          const blob = await r.blob();
+          return await new Promise((res) => {
+            const fr = new FileReader();
+            fr.onloadend = () => res(fr.result);
+            fr.onerror = () => res(null);
+            fr.readAsDataURL(blob);
+          });
+        } catch (e) {
+          return null;
+        }
+      };
+
+      // Wid: varias funciones internas lo exigen como objeto, no como texto.
+      let widObj = wid;
+      try {
+        const WF =
+          col(req("WAWebWidFactory"), "WidFactory") ||
+          (window.Store && window.Store.WidFactory);
+        if (WF && WF.createWid) widObj = WF.createWid(wid);
+      } catch (e) {
+        /* se usa el texto */
+      }
+
+      // Vía 1: el ayudante de la librería, con objeto y con texto.
+      try {
+        const W = window.WWebJS;
+        if (W && typeof W.getProfilePicThumbToBase64 === "function") {
+          for (const arg of [widObj, wid]) {
+            try {
+              const r = await W.getProfilePicThumbToBase64(arg);
+              if (r && typeof r === "string" && r.length > 32) return r;
+            } catch (e) {
+              /* siguiente */
+            }
+          }
+        }
+      } catch (e) {
+        /* siguiente vía */
+      }
+
+      // Vía 2: colección interna de miniaturas -> URL -> descarga en página.
+      try {
+        const PPT =
+          col(
+            req("WAWebProfilePicThumbCollection"),
+            "ProfilePicThumbCollection",
+          ) ||
+          (window.Store && window.Store.ProfilePicThumb);
+        if (PPT) {
+          let p = PPT.get ? PPT.get(wid) : null;
+          if ((!p || (!p.img && !p.imgFull && !p.eurl)) && PPT.find) {
+            try {
+              p = await PPT.find(widObj);
+            } catch (e) {
+              /* nada */
+            }
+          }
+          const url = p && (p.img || p.imgFull || p.eurl);
+          const dataUri = await aBase64(url);
+          if (dataUri) return dataUri;
+        }
+      } catch (e) {
+        /* siguiente vía */
+      }
+
+      // Vía 3: la función de búsqueda de foto de perfil.
+      try {
+        const PP =
+          col(req("WAWebContactProfilePicThumbBridge"), "profilePicResync") ||
+          col(req("WAWebProfilePicThumbBridge"), "profilePicFind") ||
+          (window.Store &&
+            window.Store.ProfilePic &&
+            window.Store.ProfilePic.profilePicFind);
+        if (typeof PP === "function") {
+          const r = await PP(widObj);
+          const url = r && (r.eurl || r.img || r.imgFull);
+          const dataUri = await aBase64(url);
+          if (dataUri) return dataUri;
+        }
+      } catch (e) {
+        /* sin foto */
+      }
+
+      return null;
+    }, id)
+    .catch(() => null);
+
+  if (!b64 || typeof b64 !== "string" || b64.length < 32) return null;
+  return b64.startsWith("data:") ? b64 : `data:image/jpeg;base64,${b64}`;
+}
+
 async function fotoComoDataUri(url, timeoutMs = 6000) {
   if (!url) return null;
   try {
@@ -496,23 +589,22 @@ async function datosOrla(chatId, sobrescrituras = {}) {
         //  3) el que hayas fijado a mano en el CSV
         //  4) el que usó al escribir en el grupo
         //  5) su número
-        // Se lee del store (frame correcto); getContactById queda de
-        // respaldo por si en alguna versión el store no lo trae.
-        let nombre = await conTimeout(nombreContactoPorStore(id), TIMEOUT_MS);
-        if (!nombre) {
-          const c = await conTimeout(client.getContactById(id), TIMEOUT_MS);
-          if (c) nombre = c.name || c.shortName || c.pushname || null;
-        }
+        let nombre = null;
+        const c = await conTimeout(client.getContactById(id), TIMEOUT_MS);
+        if (c) nombre = c.name || c.shortName || c.pushname || null;
         if (!nombre) nombre = sobrescrituras[digitos] || nombreDesdeBD(id);
         if (!nombre) nombre = `+${digitos}`;
 
         // Sin foto accesible (privacidad o timeout) se usa el avatar de
         // iniciales, que ya contempla el módulo de la orla.
-        let url = await conTimeout(fotoPerfilPorStore(id), TIMEOUT_MS);
-        if (!url) url = await conTimeout(client.getProfilePicUrl(id), TIMEOUT_MS);
-        let foto = await fotoComoDataUri(url);
-        // Si el contenedor no alcanza el CDN, se baja desde el navegador.
-        if (!foto && url) foto = await conTimeout(fotoPorNavegador(url), TIMEOUT_MS);
+        // 1) La página ya tiene la miniatura: sin red ni enlaces firmados.
+        let foto = await conTimeout(fotoPorPagina(id), TIMEOUT_MS);
+        let url = null;
+        // 2) Si no, se intenta por URL como antes.
+        if (!foto) {
+          url = await conTimeout(client.getProfilePicUrl(id), TIMEOUT_MS);
+          foto = await fotoComoDataUri(url);
+        }
 
         return { id, nombre, foto, teniaUrl: !!url };
       }),
@@ -520,27 +612,28 @@ async function datosOrla(chatId, sobrescrituras = {}) {
     miembros.push(...resueltos);
   }
 
-  let urlGrupo = await conTimeout(fotoPerfilPorStore(chatId), TIMEOUT_MS);
-  if (!urlGrupo) {
-    urlGrupo = await conTimeout(client.getProfilePicUrl(chatId), TIMEOUT_MS);
-  }
-  let fotoGrupo = await fotoComoDataUri(urlGrupo);
-  if (!fotoGrupo && urlGrupo) {
-    fotoGrupo = await conTimeout(fotoPorNavegador(urlGrupo), TIMEOUT_MS);
+  let fotoGrupo = await conTimeout(fotoPorPagina(chatId), TIMEOUT_MS);
+  if (!fotoGrupo) {
+    const urlGrupo = await conTimeout(
+      client.getProfilePicUrl(chatId),
+      TIMEOUT_MS,
+    );
+    fotoGrupo = await fotoComoDataUri(urlGrupo);
   }
 
   const conFoto = miembros.filter((m) => m.foto).length;
   const conUrlSinBajar = miembros.filter((m) => m.teniaUrl && !m.foto).length;
-  const sinUrl = miembros.filter((m) => !m.teniaUrl).length;
+  if (conFoto === 0 && miembros.length > 0) {
+    console.error(
+      "[orla] Ninguna foto obtenida. Si se repite, mira la línea [sonda] " +
+        "del arranque para ver qué expone la página.",
+    );
+  }
   console.log(
     `[orla] ${miembros.length} miembros, ${conFoto} con foto` +
-      // Distinguir las dos causas ahorra el diagnóstico a ciegas: sin URL
-      // es privacidad o store inaccesible; con URL es fallo de descarga.
-      (sinUrl ? `, ${sinUrl} sin URL de foto` : "") +
       (conUrlSinBajar
         ? `, ${conUrlSinBajar} con URL que no se pudo descargar`
         : "") +
-      (porRespaldo ? " · lista de miembros por historial, no del store" : "") +
       (recortado ? ` (recortado a los ${MAX_ORLA} más activos)` : ""),
   );
 
@@ -550,16 +643,11 @@ async function datosOrla(chatId, sobrescrituras = {}) {
     year: "numeric",
   });
 
-  // Si el store nos ha dado el nombre, se guarda: así lo aprovechan también
-  // el resumen personal y el chat_name de los mensajes siguientes.
-  if (g.subject) nombresChat.set(chatId, g.subject);
-
   return {
     titulo:
       g.subject ||
       nombresChat.get(chatId) ||
       (await nombreDelChat(null, chatId)) ||
-      nombreHumanoDeGrupo(chatId) ||
       "Nuestro grupo",
     subtitulo: recortado
       ? `Los ${miembros.length} miembros más activos`
@@ -600,12 +688,10 @@ async function gruposVigilados() {
     for (const g of GROUP_IDS) if (!ids.includes(g)) ids.push(g);
     ids = ids.filter((id) => GROUP_IDS.includes(id));
   }
-  const lista = await Promise.all(
-    ids.map(async (id) => ({
-      id,
-      nombre: await nombreDelChat(null, id).catch(() => null),
-    })),
-  );
+  const lista = ids.map((id) => ({
+    id,
+    nombre: nombresChat.get(id) || nombreGrupoDesdeBD(id) || null,
+  }));
   cacheChats = { lista, ts: Date.now() };
   return lista;
 }
@@ -646,12 +732,11 @@ async function gruposDelUsuario(userId) {
     if (!esMiembro) esMiembro = haEscritoAlgunaVez(chat.id, digitos);
 
     if (esMiembro) {
-      // Si no hay forma de leer el título, se nombra por quién habla ahí:
-      // un código de grupo no lo reconoce nadie, "Grupo con Ana y Luis" sí.
-      salida.push({
-        id: chat.id,
-        nombre: subject || nombreHumanoDeGrupo(chat.id) || "Grupo sin nombre",
-      });
+      // El nombre se busca por todas las vías antes de rendirse a "Grupo":
+      // en el resumen personal, ver "Grupo" en vez del nombre real es
+      // justo lo que hace que no se entienda de qué te están hablando.
+      if (!subject) subject = await nombreDelChat(null, chat.id);
+      salida.push({ id: chat.id, nombre: subject || "Grupo" });
     }
   }
   return salida;
@@ -728,57 +813,92 @@ async function lectorGrupo(id) {
     via,
   });
 
-  const disponibles = [];
+  const intentos = [];
+  const req = (nombre) => {
+    try {
+      return typeof window.require === "function"
+        ? window.require(nombre)
+        : null;
+    } catch (e) {
+      return null;
+    }
+  };
+  const coleccion = (mod, prop) =>
+    mod ? mod[prop] || mod.default || null : null;
+
+  // Nombre del grupo, buscado aparte: puede estar en el chat aunque los
+  // participantes vengan de otro sitio.
+  const nombreDe = () => {
+    try {
+      const CC =
+        coleccion(req("WAWebChatCollection"), "ChatCollection") ||
+        (window.Store && window.Store.Chat);
+      const chat = CC && CC.get ? CC.get(id) : null;
+      return (
+        (chat && (chat.name || chat.formattedTitle || chat.subject)) || null
+      );
+    } catch (e) {
+      return null;
+    }
+  };
+
   try {
-    // Vía 1: window.Store, la clásica.
+    // Vía A: window.Store, por si en alguna versión sí está inyectado.
     const S = window.Store;
-    if (S) disponibles.push("Store");
     if (S && S.GroupMetadata) {
       let meta = S.GroupMetadata.get ? S.GroupMetadata.get(id) : null;
       if ((!meta || !meta.participants) && S.GroupMetadata.find) {
         try {
           meta = await S.GroupMetadata.find(id);
-        } catch (_) {}
-      }
-      // Último recurso y el más fiable para un bot: pedirle los metadatos
-      // al servidor en vez de esperar a tenerlos ya cargados.
-      if ((!meta || !meta.participants) && S.GroupQueryAndUpdate) {
-        try {
-          const w = S.WidFactory ? S.WidFactory.createWid(id) : id;
-          await S.GroupQueryAndUpdate(w);
-          meta = S.GroupMetadata.get ? S.GroupMetadata.get(id) : meta;
-        } catch (_) {}
+        } catch (e) {
+          intentos.push("Store.find: " + ((e && e.message) || e));
+        }
       }
       const models = lista(meta && meta.participants);
       if (models.length > 0) {
-        // El nombre se buscaba solo con .get(), que lee la colección local
-        // (vacía si el chat no se ha abierto en la interfaz). Por eso salían
-        // los participantes pero no el título. Con .find() sí se pide.
-        let chat = S.Chat && S.Chat.get ? S.Chat.get(id) : null;
-        if (!chat && S.Chat && typeof S.Chat.find === "function") {
-          try {
-            chat = await S.Chat.find(
-              S.WidFactory ? S.WidFactory.createWid(id) : id,
-            );
-          } catch (_) {}
-        }
-        return salida(
-          models,
-          (meta && (meta.subject || meta.name)) ||
-            (chat && (chat.name || chat.formattedTitle)),
-          "Store.GroupMetadata",
-        );
+        return salida(models, (meta && meta.subject) || nombreDe(), "Store");
       }
     }
 
-    // Vía 2: window.WWebJS, los ayudantes de la propia librería.
+    // Vía B: los módulos internos por require(). Es lo que usa la propia
+    // librería para construir window.Store, así que sirve aunque esa
+    // inyección no haya ocurrido (que es justo lo que pasa aquí).
+    const GM =
+      coleccion(
+        req("WAWebGroupMetadataCollection"),
+        "GroupMetadataCollection",
+      ) || coleccion(req("WAWebGroupMetadata"), "GroupMetadataCollection");
+    if (GM) {
+      let meta = GM.get ? GM.get(id) : null;
+      if ((!meta || !meta.participants) && GM.find) {
+        try {
+          meta = await GM.find(id);
+        } catch (e) {
+          intentos.push("require.find: " + ((e && e.message) || e));
+        }
+      }
+      const models = lista(meta && meta.participants);
+      if (models.length > 0) {
+        return salida(
+          models,
+          (meta && meta.subject) || nombreDe(),
+          "require:GroupMetadataCollection",
+        );
+      }
+      intentos.push("GM sin participantes");
+    } else {
+      intentos.push("sin GroupMetadataCollection");
+    }
+
+    // Vía C: WWebJS.getChat. Va la última porque es el mismo camino que
+    // usa getChatById, el que falla con el error "r".
     const W = window.WWebJS;
-    if (W) disponibles.push("WWebJS");
     if (W && typeof W.getChat === "function") {
       try {
         const chat = await W.getChat(id);
         const models = lista(
-          chat && (chat.participants || chat.groupMetadata?.participants),
+          chat &&
+            (chat.participants || (chat.groupMetadata || {}).participants),
         );
         if (models.length > 0) {
           return salida(
@@ -787,337 +907,42 @@ async function lectorGrupo(id) {
             "WWebJS.getChat",
           );
         }
-      } catch (_) {}
-    }
-
-    // Vía 3: el chat del store, que a veces trae los metadatos dentro.
-    if (S && S.Chat && S.Chat.get) {
-      const chat = S.Chat.get(id);
-      const models = lista(
-        chat && chat.groupMetadata && chat.groupMetadata.participants,
-      );
-      if (models.length > 0) {
-        return salida(models, chat.name || chat.formattedTitle, "Store.Chat");
+        intentos.push("WWebJS.getChat sin participantes");
+      } catch (e) {
+        intentos.push("WWebJS.getChat: " + ((e && e.message) || e));
       }
     }
 
+    const globales = [];
+    for (const k of ["Store", "WWebJS", "require"]) {
+      if (typeof window[k] !== "undefined") globales.push(k);
+    }
     return {
       error: "sin datos de grupo",
-      globales: disponibles.join(",") || "ninguno",
+      globales: globales.join(",") || "ninguno",
+      intentos: intentos.join(" | "),
+      subject: nombreDe(),
     };
   } catch (e) {
-    return { error: String((e && e.message) || e) };
-  }
-}
-
-// ---- Acceso al almacén interno, frame a frame ----
-// window.Store no siempre vive en el frame principal: según la versión,
-// WhatsApp Web se carga dentro de un iframe. Cuando eso pasa, TODO lo que
-// whatsapp-web.js resuelve con this.pupPage.evaluate() (getContactById,
-// getProfilePicUrl, getChatById...) devuelve vacío sin lanzar nada visible:
-// la llamada "funciona", simplemente no encuentra el store. Ese es el
-// motivo de que la orla saliera con iniciales y sin nombre de grupo aunque
-// WhatsApp Web lo muestre todo bien.
-//
-// La solución que ya usaba grupoPorStore -recorrer los frames- se extrae
-// aquí para que la usen también las fotos y los nombres. El frame que
-// funciona se recuerda: una orla son decenas de llamadas y no tiene
-// sentido recorrer todos los frames en cada una.
-let frameStore = null;
-
-/**
- * Reconstruye window.Store. Se ejecuta DENTRO de la página.
- *
- * Los logs del servidor dijeron lo que ninguna conjetura acertó: en la
- * página existen 'WWebJS' y 'require', pero NO 'Store'. Y como todas las
- * funciones de WWebJS leen window.Store en tiempo de llamada
- * (getProfilePicThumbToBase64 hace window.Store.ProfilePicThumb.find),
- * al faltar el Store falla absolutamente todo: nombres, fotos y getChat.
- *
- * Por qué falta: ExposeStore de whatsapp-web.js encadena ~60
- * window.require() sin proteger ninguno. Basta que WhatsApp haya renombrado
- * un módulo para que la función entera lance y window.Store no se asigne.
- *
- * Aquí se pide solo lo que hace falta y cada módulo va protegido: si uno
- * falta, se pierde esa pieza, no el Store entero. Como efecto secundario
- * esto repara también los métodos de la propia librería, que vuelven a
- * encontrar el Store donde lo buscan.
- */
-function bootstrapStore() {
-  const r = { ya: false, creado: false, modulos: {}, error: null };
-  try {
-    if (window.Store && window.Store.Chat && window.Store.Contact) {
-      r.ya = true;
-      return r;
-    }
-    if (typeof window.require !== "function") {
-      r.error = "window.require no disponible";
-      return r;
-    }
-
-    const pedir = (nombre) => {
-      try {
-        const m = window.require(nombre);
-        r.modulos[nombre] = m ? "ok" : "vacío";
-        return m || null;
-      } catch (e) {
-        r.modulos[nombre] = `error: ${String((e && e.message) || e)}`;
-        return null;
-      }
+    return {
+      error: String((e && e.message) || e),
+      intentos: intentos.join(" | "),
     };
-
-    const S =
-      window.Store && typeof window.Store === "object" ? window.Store : {};
-
-    // Chat, Contact, GroupMetadata y ProfilePicThumb salen todos de aquí.
-    const cols = pedir("WAWebCollections");
-    if (cols) Object.assign(S, cols);
-
-    const wid = pedir("WAWebWidFactory");
-    if (wid) S.WidFactory = wid;
-
-    const pp = pedir("WAWebContactProfilePicThumbBridge");
-    if (pp) {
-      S.ProfilePic = pp;
-      if (!S.ProfilePicThumb) S.ProfilePicThumb = pp;
-    }
-
-    // Pide los metadatos del grupo al servidor: imprescindible para un bot
-    // que nunca abre los chats en la interfaz y por tanto no los tiene
-    // cargados en las colecciones locales.
-    const gq = pedir("WAWebGroupQueryJob");
-    if (gq && gq.queryAndUpdateGroupMetadataById) {
-      S.GroupQueryAndUpdate = gq.queryAndUpdateGroupMetadataById;
-    }
-
-    const cm = pedir("WAWebContactGetters");
-    if (cm) S.ContactMethods = cm;
-
-    if (!S.Chat && !S.Contact && !S.GroupMetadata) {
-      r.error = "WAWebCollections no trajo ninguna colección";
-      return r;
-    }
-
-    window.Store = S;
-    r.creado = true;
-    r.claves = Object.keys(S).length;
-    r.tiene = {
-      Chat: !!S.Chat,
-      Contact: !!S.Contact,
-      GroupMetadata: !!S.GroupMetadata,
-      ProfilePic: !!S.ProfilePic,
-      WidFactory: !!S.WidFactory,
-      GroupQueryAndUpdate: !!S.GroupQueryAndUpdate,
-    };
-    return r;
-  } catch (e) {
-    r.error = String((e && e.message) || e);
-    return r;
   }
-}
-
-// Comprobar el Store en cada lectura sería un evaluate de más por foto y
-// por nombre. Basta con revalidarlo de vez en cuando: si la página se
-// recarga y se lo lleva por delante, se reconstruye en la siguiente ronda.
-let storeVerificado = 0;
-let storeAvisado = 0;
-const STORE_TTL_MS = 30 * 1000;
-
-async function asegurarStore(forzar = false) {
-  if (!client.pupPage) return null;
-  if (!forzar && Date.now() - storeVerificado < STORE_TTL_MS) return null;
-
-  let ultimo = null;
-  for (const ctx of contextosStore()) {
-    const r = await ctx.evaluate(bootstrapStore).catch(() => null);
-    if (r && (r.ya || r.creado)) {
-      frameStore = ctx;
-      storeVerificado = Date.now();
-      if (r.creado && Date.now() - storeAvisado > 60000) {
-        storeAvisado = Date.now();
-        console.log(
-          `[store] Reconstruido con window.require (la librería no lo dejó): ` +
-            `${r.claves} claves · ${JSON.stringify(r.tiene)}`,
-        );
-      }
-      return r;
-    }
-    ultimo = r;
-  }
-
-  if (ultimo && Date.now() - storeAvisado > 60000) {
-    storeAvisado = Date.now();
-    console.error(
-      `[store] No pude reconstruir el Store: ${ultimo.error || "sin respuesta"}` +
-        ` · módulos: ${JSON.stringify(ultimo.modulos || {})}`,
-    );
-  }
-  return ultimo;
-}
-
-function contextosStore() {
-  const contextos = [];
-  if (!client.pupPage) return contextos;
-  if (frameStore) contextos.push(frameStore);
-  if (!contextos.includes(client.pupPage)) contextos.push(client.pupPage);
-  try {
-    for (const f of client.pupPage.frames()) {
-      if (f !== client.pupPage.mainFrame() && !contextos.includes(f)) {
-        contextos.push(f);
-      }
-    }
-  } catch (_) {}
-  return contextos;
-}
-
-/**
- * Evalúa una función DENTRO de la página, en el frame que tenga el store.
- * @param {Function} fn      código a ejecutar en el navegador
- * @param {Array} args       argumentos (serializables) para fn
- * @param {Function} sirve   decide si el resultado es válido
- */
-async function evaluarEnStore(fn, args = [], sirve = (r) => r != null) {
-  // Sin Store no hay nada que leer: se reconstruye antes de preguntar.
-  await asegurarStore();
-  for (const ctx of contextosStore()) {
-    // Un frame recordado que ya no exista lanza aquí: se pasa al siguiente,
-    // así la caché se corrige sola tras una recarga de WhatsApp Web.
-    const res = await ctx.evaluate(fn, ...args).catch(() => null);
-    if (sirve(res)) {
-      frameStore = ctx;
-      return res;
-    }
-  }
-  return null;
-}
-
-/**
- * Radiografía del store, frame por frame. Se ejecuta DENTRO de la página.
- *
- * Existe porque diagnosticar esto a ciegas no funciona: "no salen las
- * fotos" puede ser el store ausente, un módulo renombrado, una colección
- * vacía o una descarga bloqueada, y cada causa tiene un arreglo distinto.
- * Devuelve datos, no conjeturas.
- */
-async function lectorDiagnostico(id) {
-  const tipo = (v) => (v == null ? "no" : typeof v);
-  const cuenta = (col) => {
-    try {
-      if (!col) return null;
-      if (col.getModelsArray) return col.getModelsArray().length;
-      if (Array.isArray(col._models)) return col._models.length;
-      return null;
-    } catch (_) {
-      return null;
-    }
-  };
-
-  const r = { url: location.href, globales: {}, store: {}, chat: {} };
-  try {
-    r.globales = {
-      Store: tipo(window.Store),
-      WWebJS: tipo(window.WWebJS),
-      Debug: tipo(window.Debug),
-      version: (window.Debug && window.Debug.VERSION) || null,
-      compareWwebVersions: tipo(window.compareWwebVersions),
-    };
-
-    const S = window.Store;
-    if (!S) return r;
-
-    for (const m of [
-      "Chat",
-      "Contact",
-      "GroupMetadata",
-      "ProfilePic",
-      "WidFactory",
-    ]) {
-      r.store[m] = tipo(S[m]);
-    }
-    r.store.ChatEnColeccion = cuenta(S.Chat);
-    r.store.ContactEnColeccion = cuenta(S.Contact);
-    r.store.metodosProfilePic = S.ProfilePic
-      ? Object.keys(S.ProfilePic).filter(
-          (k) => typeof S.ProfilePic[k] === "function",
-        )
-      : null;
-
-    if (!id) return r;
-
-    // Qué devuelve cada vía para ESTE grupo en concreto.
-    try {
-      const meta =
-        S.GroupMetadata && S.GroupMetadata.get ? S.GroupMetadata.get(id) : null;
-      r.chat.metaExiste = !!meta;
-      r.chat.metaSubject = (meta && (meta.subject || meta.name)) || null;
-      r.chat.metaParticipantes = meta
-        ? cuenta(meta.participants) ||
-          (meta.participants && meta.participants.length) ||
-          0
-        : null;
-    } catch (e) {
-      r.chat.metaError = String((e && e.message) || e);
-    }
-
-    try {
-      const chat = S.Chat && S.Chat.get ? S.Chat.get(id) : null;
-      r.chat.chatExiste = !!chat;
-      r.chat.chatName = (chat && (chat.name || chat.formattedTitle)) || null;
-    } catch (e) {
-      r.chat.chatError = String((e && e.message) || e);
-    }
-
-    // La hipótesis principal: .get() lee solo lo ya cargado, .find() lo pide.
-    // Si aquí find() trae el nombre y get() no, ésa era la causa.
-    const wid = S.WidFactory ? S.WidFactory.createWid(id) : id;
-    for (const col of ["Chat", "GroupMetadata", "Contact"]) {
-      if (!S[col] || typeof S[col].find !== "function") {
-        r.chat[`${col}_find`] = "no existe";
-        continue;
-      }
-      try {
-        const o = await S[col].find(wid);
-        r.chat[`${col}_find`] = o
-          ? {
-              name: o.name || o.formattedTitle || o.subject || null,
-              campos: Object.keys(o).slice(0, 12),
-            }
-          : null;
-      } catch (e) {
-        r.chat[`${col}_find`] = `error: ${String((e && e.message) || e)}`;
-      }
-    }
-
-    try {
-      if (S.ProfilePic && S.WidFactory) {
-        const w = S.WidFactory.createWid(id);
-        for (const metodo of ["profilePicFind", "requestProfilePicFromServer"]) {
-          if (typeof S.ProfilePic[metodo] !== "function") continue;
-          try {
-            const pp = await S.ProfilePic[metodo](w);
-            r.chat[metodo] = pp
-              ? { campos: Object.keys(pp), eurl: pp.eurl || null }
-              : null;
-          } catch (e) {
-            r.chat[metodo] = `error: ${String((e && e.message) || e)}`;
-          }
-        }
-      }
-    } catch (e) {
-      r.chat.fotoError = String((e && e.message) || e);
-    }
-  } catch (e) {
-    r.error = String((e && e.message) || e);
-  }
-  return r;
 }
 
 /** Ejecuta el lector en el frame principal y, si falla, en cada iframe. */
 async function grupoPorStore(chatId) {
   if (!client.pupPage) return null;
 
-  await asegurarStore();
-  const contextos = contextosStore();
+  const contextos = [client.pupPage];
+  try {
+    // Si la app vive en un iframe, el frame principal no ve nada.
+    for (const f of client.pupPage.frames()) {
+      if (f !== client.pupPage.mainFrame()) contextos.push(f);
+    }
+  } catch (_) {}
+
   let ultimoError = null;
   for (const ctx of contextos) {
     const res = await ctx
@@ -1130,7 +955,6 @@ async function grupoPorStore(chatId) {
       res.participantes &&
       res.participantes.length > 0
     ) {
-      frameStore = ctx;
       console.log(
         `[store] ${chatId}: ${res.total} miembros vía ${res.via}` +
           (res.subject ? ` · "${res.subject}"` : ""),
@@ -1143,156 +967,18 @@ async function grupoPorStore(chatId) {
   console.error(
     `[store] ${chatId}: ${(ultimoError && ultimoError.error) || "sin respuesta"}` +
       (ultimoError && ultimoError.globales
-        ? ` · globales en la página: ${ultimoError.globales}`
+        ? ` · globales: ${ultimoError.globales}`
         : "") +
-      ` · frames probados: ${contextos.length}`,
+      (ultimoError && ultimoError.intentos
+        ? ` · intentos: ${ultimoError.intentos}`
+        : ""),
   );
-  return null;
-}
-
-/**
- * URL de la foto de perfil (persona o grupo) leída del store.
- *
- * No usa client.getProfilePicUrl porque ese evalúa solo en el frame
- * principal. Además prueba los dos métodos que ha tenido el store según la
- * versión de WhatsApp Web, y acepta varios nombres de campo: la librería
- * solo mira 'eurl' y en algunas versiones la imagen viene en otro.
- */
-const viasFoto = new Set();
-
-async function fotoPerfilPorStore(id) {
-  const r = await evaluarEnStore(
-    async (wid) => {
-      try {
-        const S = window.Store;
-        if (!S || !S.ProfilePic || !S.WidFactory) return null;
-        const w = S.WidFactory.createWid(wid);
-        const urlDe = (pp) => (pp && (pp.eurl || pp.imgFull || pp.img)) || null;
-
-        // Los dos nombres conocidos primero. Si esta versión de WhatsApp
-        // Web los ha renombrado -que es la causa que no podemos descartar
-        // desde fuera-, se rastrea el módulo en busca de cualquier función
-        // que suene a foto de perfil, en vez de rendirse.
-        const preferidos = ["profilePicFind", "requestProfilePicFromServer"];
-        let otros = [];
-        try {
-          otros = Array.from(
-            new Set([
-              ...Object.keys(S.ProfilePic),
-              ...Object.getOwnPropertyNames(S.ProfilePic),
-            ]),
-          ).filter(
-            (k) =>
-              !preferidos.includes(k) &&
-              /profilepic|picthumb/i.test(k) &&
-              typeof S.ProfilePic[k] === "function",
-          );
-        } catch (_) {}
-
-        for (const metodo of [...preferidos, ...otros]) {
-          if (typeof S.ProfilePic[metodo] !== "function") continue;
-          try {
-            const url = urlDe(await S.ProfilePic[metodo](w));
-            if (url) return { url, via: metodo };
-          } catch (_) {}
-        }
-        return null;
-      } catch (_) {
-        return null;
-      }
-    },
-    [id],
-    (x) => x && typeof x.url === "string" && x.url.length > 0,
-  );
-
-  // Registrar una sola vez por qué vía llegan: si resulta ser una que no
-  // estaba en la lista, queda constancia sin llenar el log.
-  if (r && r.via && !viasFoto.has(r.via)) {
-    viasFoto.add(r.via);
-    console.log(`[foto] Fotos de perfil vía Store.ProfilePic.${r.via}`);
+  // Aunque no haya participantes, el nombre del grupo puede haberse
+  // resuelto: se devuelve para no perderlo (la orla lo usa).
+  if (ultimoError && ultimoError.subject) {
+    return { participantes: [], subject: ultimoError.subject, total: 0 };
   }
-  return r ? r.url : null;
-}
-
-/**
- * Descarga la imagen desde DENTRO del navegador ya autenticado.
- *
- * Respaldo para cuando el fetch desde Node no llega al CDN de WhatsApp
- * (red del contenedor, enlace que exige la sesión). Ahí dentro la petición
- * sale igual que la que hace la propia WhatsApp Web al pintar el avatar.
- */
-async function fotoPorNavegador(url) {
-  return evaluarEnStore(
-    async (u) => {
-      try {
-        const r = await fetch(u);
-        if (!r.ok) return null;
-        const b = await r.blob();
-        if (!b.size) return null;
-        return await new Promise((res) => {
-          const fr = new FileReader();
-          fr.onloadend = () => res(String(fr.result));
-          fr.onerror = () => res(null);
-          fr.readAsDataURL(b);
-        });
-      } catch (_) {
-        return null;
-      }
-    },
-    [url],
-    (r) => typeof r === "string" && r.startsWith("data:"),
-  );
-}
-
-/**
- * Nombre de un contacto leído del store (agenda, o el que se puso él).
- *
- * Dos motivos para no usar client.getContactById:
- *  1) .get() solo mira la colección local, que se rellena cuando abres el
- *     chat en la interfaz. El bot no abre chats, así que está casi vacía:
- *     hay que usar .find(), que sí va a buscarlo. Es exactamente lo que ya
- *     hacía lectorGrupo con GroupMetadata, la única vía que funcionaba.
- *  2) WWebJS.getContact hace `bizProfile.profileOptions && ...` sin
- *     comprobar que fetchBizProfile haya devuelto algo: con un contacto
- *     normal eso lanza un TypeError y la llamada entera se pierde.
- */
-async function nombreContactoPorStore(id) {
-  return evaluarEnStore(
-    async (wid) => {
-      const nombreDe = (c) =>
-        (c &&
-          (c.name ||
-            c.shortName ||
-            c.pushname ||
-            c.notifyName ||
-            c.verifiedName)) ||
-        null;
-      try {
-        const S = window.Store;
-        if (!S || !S.Contact) return null;
-        let n = nombreDe(S.Contact.get ? S.Contact.get(wid) : null);
-        if (n) return n;
-        if (typeof S.Contact.find === "function") {
-          // .find() espera un Wid, no una cadena.
-          for (const arg of [
-            S.WidFactory ? S.WidFactory.createWid(wid) : null,
-            wid,
-          ]) {
-            if (!arg) continue;
-            try {
-              n = nombreDe(await S.Contact.find(arg));
-              if (n) return n;
-            } catch (_) {}
-          }
-        }
-        return null;
-      } catch (_) {
-        return null;
-      }
-    },
-    [id],
-    (r) => typeof r === "string" && r.trim().length > 0,
-  );
+  return null;
 }
 
 async function adminsPorStore(chatId) {
@@ -1367,47 +1053,42 @@ client.on("group_admin_changed", (notification) => {
  */
 async function nombreGrupoPorStore(chatId) {
   if (!client.pupPage) return null;
-  // Igual que con los contactos: .get() solo lee la colección local, que
-  // está vacía porque el bot nunca abre el chat en la interfaz. Hay que
-  // pedirlo con .find(), como ya hacía lectorGrupo con GroupMetadata.
-  return evaluarEnStore(
-    async (id) => {
-      const tituloDe = (c) =>
-        (c && (c.name || c.formattedTitle || c.subject)) || null;
+  const res = await client.pupPage
+    .evaluate((id) => {
       try {
         const S = window.Store;
         if (!S) return null;
-        const wid = S.WidFactory ? S.WidFactory.createWid(id) : null;
-
-        // 1) Lo que ya esté cargado, que es gratis.
-        let n =
-          tituloDe(S.Chat && S.Chat.get ? S.Chat.get(id) : null) ||
-          tituloDe(
-            S.GroupMetadata && S.GroupMetadata.get
-              ? S.GroupMetadata.get(id)
-              : null,
-          );
-        if (n) return n;
-
-        // 2) Pedirlo de verdad.
-        for (const col of ["GroupMetadata", "Chat"]) {
-          if (!S[col] || typeof S[col].find !== "function") continue;
-          for (const arg of [wid, id]) {
-            if (!arg) continue;
-            try {
-              n = tituloDe(await S[col].find(arg));
-              if (n) return n;
-            } catch (_) {}
+        const req = (n) => {
+          try {
+            return typeof window.require === "function"
+              ? window.require(n)
+              : null;
+          } catch (e) {
+            return null;
           }
-        }
-        return null;
+        };
+        const col = (m, p) => (m ? m[p] || m.default || null : null);
+        const CC =
+          col(req("WAWebChatCollection"), "ChatCollection") ||
+          (S && S.Chat) ||
+          null;
+        const GM =
+          col(req("WAWebGroupMetadataCollection"), "GroupMetadataCollection") ||
+          (S && S.GroupMetadata) ||
+          null;
+        const chat = CC && CC.get ? CC.get(id) : null;
+        const meta = GM && GM.get ? GM.get(id) : null;
+        return (
+          (chat && (chat.name || chat.formattedTitle || chat.subject)) ||
+          (meta && meta.subject) ||
+          null
+        );
       } catch (_) {
         return null;
       }
-    },
-    [chatId],
-    (r) => typeof r === "string" && r.trim().length > 0,
-  );
+    }, chatId)
+    .catch(() => null);
+  return res || null;
 }
 
 /** Último nombre conocido del grupo guardado en la base de datos. */
@@ -1426,17 +1107,47 @@ function nombreGrupoDesdeBD(chatId) {
   }
 }
 
+/**
+ * Nombre del grupo tomado del propio mensaje recibido.
+ *
+ * Es la fuente más barata y fiable: no hace falta consultar nada a la
+ * página (que es donde todo falla en esta instalación), porque WhatsApp
+ * suele incluir el título del chat en los datos crudos del mensaje.
+ */
+function nombreGrupoDesdeMensaje(msg) {
+  try {
+    const d = msg && msg._data;
+    if (!d) return null;
+    const candidatos = [
+      d.chatSubject,
+      d.chat && d.chat.subject,
+      d.chat && d.chat.name,
+      d.chat && d.chat.formattedTitle,
+      d.groupMetadata && d.groupMetadata.subject,
+      d.notifyName && d.isGroupMsg ? null : null, // notifyName es del autor
+    ];
+    for (const c of candidatos) {
+      if (c && typeof c === "string" && c.trim()) return c.trim();
+    }
+  } catch (_) {}
+  return null;
+}
+
 async function nombreDelChat(msg, chatId) {
   const cacheado = nombresChat.get(chatId);
   if (cacheado) return cacheado; // solo si es un nombre real, no null
 
-  let nombre = null;
-  // 1) Store interno: no depende de getChat(), que está roto.
-  try {
-    nombre = await nombreGrupoPorStore(chatId);
-  } catch (_) {}
+  // 1) El propio mensaje: gratis y sin depender de la página.
+  let nombre = nombreGrupoDesdeMensaje(msg);
 
-  // 2) getChat() por si acaso funciona en esta versión.
+  // 2) Módulos internos de la página.
+  if (!nombre) {
+    try {
+      nombre = await nombreGrupoPorStore(chatId);
+    } catch (_) {}
+  }
+
+  // 3) getChat() por si acaso funciona en esta versión.
   if (!nombre && msg) {
     try {
       const chat = await msg.getChat();
@@ -1446,7 +1157,7 @@ async function nombreDelChat(msg, chatId) {
     }
   }
 
-  // 3) El último nombre que llegamos a guardar alguna vez.
+  // 4) El último nombre que llegamos a guardar alguna vez.
   if (!nombre) nombre = nombreGrupoDesdeBD(chatId);
 
   if (nombre) {
@@ -1469,7 +1180,7 @@ async function atenderPrivado(msg) {
     } catch (_) {}
 
     const respuesta = await personal.handlePrivate(db, {
-      body: await normalizarMencionAlBot(msg, msg.body || ""),
+      body: normalizarMencionAlBot(msg, msg.body || ""),
       userId: from,
       nombre,
       botNumber:
@@ -1497,68 +1208,40 @@ async function atenderPrivado(msg) {
  * SOLO para quien tiene el contacto guardado, sea cual sea la
  * mayúscula/minúscula usada — no es un problema de mayúsculas.
  *
- * Aquí se detecta esa mención real resolviendo los Contact de
- * msg.getMentions() y comprobando isMe (no comparando ids en bruto, que
- * falla si mentionedIds usa LID y client.info.wid el número clásico) y se
- * sustituye el token de mención propio por el disparador configurado,
- * esté donde esté en la frase, para que el resto del bot vea siempre lo
- * mismo que si se hubiera escrito a mano.
+ * Aquí se detecta esa mención real (msg.mentionedIds incluye al propio
+ * bot) y se sustituye el primer token "@algo" por el disparador
+ * configurado, para que el resto del bot vea siempre lo mismo que si se
+ * hubiera escrito a mano.
  */
-async function normalizarMencionAlBot(msg, textoOriginal) {
+function normalizarMencionAlBot(msg, textoOriginal) {
   try {
-    const t = String(textoOriginal || "");
-    // Si el texto plano ya deja ver el disparador (al principio o suelto
-    // en medio de la frase), no hay nada que normalizar: lo escribieron a
-    // mano, no es una mención real.
-    if (util.detectarMencion(t) != null) return t;
-
-    if (!Array.isArray(msg.mentionedIds) || msg.mentionedIds.length === 0) {
+    const yo = client.info && client.info.wid && client.info.wid._serialized;
+    if (
+      !yo ||
+      !Array.isArray(msg.mentionedIds) ||
+      msg.mentionedIds.length === 0
+    ) {
       return textoOriginal;
     }
-
-    // Se resuelve con los Contact reales (msg.getMentions()) en vez de
-    // comparar el id crudo contra client.info.wid: desde que WhatsApp usa
-    // LID además del número clásico, mentionedIds puede venir en un
-    // formato distinto al de client.info.wid aunque el mencionado seas tú
-    // (comparar dígitos entonces no coincide nunca). Contact.isMe lo
-    // resuelve el propio WhatsApp Web, así que no depende de qué formato
-    // de id se use ese día.
-    let contactos = [];
-    try {
-      contactos = await msg.getMentions();
-    } catch (e) {
-      console.error(
-        "[mencion] No se pudieron resolver los contactos mencionados:",
-        e.message,
-      );
-    }
-    const yoMencionado = contactos.find((c) => c && c.isMe);
-
-    if (!yoMencionado) {
+    const meMencionan = msg.mentionedIds.some((id) => util.mismoNumero(id, yo));
+    if (!meMencionan) {
       // Diagnóstico: si esto sale con frecuencia y el mensaje va dirigido
-      // claramente al bot, ni siquiera getMentions() lo identifica como
-      // "yo" — revisar aquí primero antes de tocar nada más.
+      // claramente al bot, es probable que mentionedIds use un formato
+      // (LID) distinto al de client.info.wid (número clásico), y esta
+      // normalización no podría detectarlo. Este log ayuda a confirmarlo
+      // sin tener que adivinar.
       console.log(
-        `[mencion] Mención sin identificar como propia. ` +
+        `[mencion] Mención sin identificar como propia. yo=${yo} ` +
           `mentionedIds=${msg.mentionedIds.join(",")}`,
       );
       return textoOriginal;
     }
 
-    // El token que aparece en el texto crudo es "@" + la parte de usuario
-    // del id tal como WhatsApp lo mencionó (número clásico o LID), esté
-    // donde esté en la frase — no el primer "@algo" a ciegas, que podría
-    // ser la mención a otra persona.
-    const token = yoMencionado.id && yoMencionado.id.user;
-    if (token) {
-      const tokenPropio = new RegExp("@" + token + "\\b");
-      if (tokenPropio.test(t)) {
-        return t.replace(tokenPropio, util.TRIGGER).trim();
-      }
-    }
+    const t = String(textoOriginal || "");
+    // Si ya empieza con el disparador en texto plano, no hay nada que
+    // normalizar (lo escribieron a mano, no es una mención real).
+    if (t.trim().toLowerCase().startsWith(util.TRIGGER)) return t;
 
-    // Formato inesperado: si al menos el mensaje empieza por una mención,
-    // se sustituye igual para no perder el comando.
     return t.replace(/^@\S+\s*/, `${util.TRIGGER} `);
   } catch (e) {
     console.error("[mencion] Error normalizando:", e.message);
@@ -1589,13 +1272,12 @@ client.on("message_create", async (msg) => {
   // escribe), el cuerpo crudo no empieza por el disparador de texto. Se
   // normaliza una sola vez y se usa tanto para guardar como para procesar
   // el comando, así el resto del bot no necesita saber nada de menciones.
-  const bodyNormalizado = await normalizarMencionAlBot(msg, msg.body || "");
+  const bodyNormalizado = normalizarMencionAlBot(msg, msg.body || "");
 
-  // ¿Iba dirigido al bot? El disparador puede estar al principio o suelto
-  // en medio de la frase ("oye @madaleno, ¿qué tal?"). Esto es lo que
-  // mantiene los comandos fuera de resúmenes, estadísticas y GIF, aunque
-  // lleguen como mención real de WhatsApp o mencionen al bot a media frase.
-  const esComando = util.detectarMencion(bodyNormalizado) != null ? 1 : 0;
+  // ¿Iba dirigido al bot? Tras normalizar, cualquier orden empieza por el
+  // disparador. Esto es lo que mantiene los comandos fuera de resúmenes,
+  // estadísticas y GIF, aunque lleguen como mención real de WhatsApp.
+  const esComando = util.norm(bodyNormalizado).startsWith(util.TRIGGER) ? 1 : 0;
 
   // 2) Guardar el mensaje. Aislado: si algo falla aquí, el bot todavía
   //    puede responder al comando.
@@ -1917,59 +1599,6 @@ app.get("/groups", (_req, res) => {
     )
     .all();
   res.json(rows);
-});
-
-/**
- * Radiografía del store de WhatsApp Web, frame por frame.
- *   GET /diag/store?chat_id=...@g.us
- *
- * Para cuando la orla sale sin fotos o sin nombre: dice si el store existe,
- * en qué frame, qué módulos tiene y qué devuelve cada vía para ese grupo.
- * Sin esto el diagnóstico es adivinar, y adivinar ya ha fallado una vez.
- */
-app.get("/diag/store", async (req, res) => {
-  const chatId = req.query.chat_id || null;
-  if (!client.pupPage) {
-    return res.status(503).json({ error: "El navegador no está listo" });
-  }
-
-  const bootstrap = await asegurarStore(true);
-  const contextos = contextosStore();
-  const frames = [];
-  for (const ctx of contextos) {
-    const r = await ctx
-      .evaluate(lectorDiagnostico, chatId)
-      .catch((e) => ({ error: String((e && e.message) || e) }));
-    frames.push(r);
-  }
-
-  // Y lo que el bot obtiene de verdad por sus propios caminos.
-  const efectivo = {};
-  if (chatId) {
-    const g = await grupoPorStore(chatId).catch(() => null);
-    efectivo.grupoPorStore = g
-      ? { via: g.via, miembros: g.total, subject: g.subject }
-      : null;
-    efectivo.nombreGrupoPorStore = await nombreGrupoPorStore(chatId).catch(
-      () => null,
-    );
-    efectivo.nombreGrupoDesdeBD = nombreGrupoDesdeBD(chatId);
-    efectivo.nombreHumano = nombreHumanoDeGrupo(chatId);
-    efectivo.fotoPerfilPorStore = await fotoPerfilPorStore(chatId).catch(
-      () => null,
-    );
-    efectivo.getProfilePicUrl = await client
-      .getProfilePicUrl(chatId)
-      .catch((e) => `error: ${e.message}`);
-  }
-
-  res.json({
-    chatId,
-    bootstrap,
-    framesProbados: contextos.length,
-    frames,
-    efectivo,
-  });
 });
 
 /**
