@@ -460,16 +460,23 @@ async function datosOrla(chatId, sobrescrituras = {}) {
         //  3) el que hayas fijado a mano en el CSV
         //  4) el que usó al escribir en el grupo
         //  5) su número
-        let nombre = null;
-        const c = await conTimeout(client.getContactById(id), TIMEOUT_MS);
-        if (c) nombre = c.name || c.shortName || c.pushname || null;
+        // Se lee del store (frame correcto); getContactById queda de
+        // respaldo por si en alguna versión el store no lo trae.
+        let nombre = await conTimeout(nombreContactoPorStore(id), TIMEOUT_MS);
+        if (!nombre) {
+          const c = await conTimeout(client.getContactById(id), TIMEOUT_MS);
+          if (c) nombre = c.name || c.shortName || c.pushname || null;
+        }
         if (!nombre) nombre = sobrescrituras[digitos] || nombreDesdeBD(id);
         if (!nombre) nombre = `+${digitos}`;
 
         // Sin foto accesible (privacidad o timeout) se usa el avatar de
         // iniciales, que ya contempla el módulo de la orla.
-        const url = await conTimeout(client.getProfilePicUrl(id), TIMEOUT_MS);
-        const foto = await fotoComoDataUri(url);
+        let url = await conTimeout(fotoPerfilPorStore(id), TIMEOUT_MS);
+        if (!url) url = await conTimeout(client.getProfilePicUrl(id), TIMEOUT_MS);
+        let foto = await fotoComoDataUri(url);
+        // Si el contenedor no alcanza el CDN, se baja desde el navegador.
+        if (!foto && url) foto = await conTimeout(fotoPorNavegador(url), TIMEOUT_MS);
 
         return { id, nombre, foto, teniaUrl: !!url };
       }),
@@ -477,19 +484,27 @@ async function datosOrla(chatId, sobrescrituras = {}) {
     miembros.push(...resueltos);
   }
 
-  const urlGrupo = await conTimeout(
-    client.getProfilePicUrl(chatId),
-    TIMEOUT_MS,
-  );
-  const fotoGrupo = await fotoComoDataUri(urlGrupo);
+  let urlGrupo = await conTimeout(fotoPerfilPorStore(chatId), TIMEOUT_MS);
+  if (!urlGrupo) {
+    urlGrupo = await conTimeout(client.getProfilePicUrl(chatId), TIMEOUT_MS);
+  }
+  let fotoGrupo = await fotoComoDataUri(urlGrupo);
+  if (!fotoGrupo && urlGrupo) {
+    fotoGrupo = await conTimeout(fotoPorNavegador(urlGrupo), TIMEOUT_MS);
+  }
 
   const conFoto = miembros.filter((m) => m.foto).length;
   const conUrlSinBajar = miembros.filter((m) => m.teniaUrl && !m.foto).length;
+  const sinUrl = miembros.filter((m) => !m.teniaUrl).length;
   console.log(
     `[orla] ${miembros.length} miembros, ${conFoto} con foto` +
+      // Distinguir las dos causas ahorra el diagnóstico a ciegas: sin URL
+      // es privacidad o store inaccesible; con URL es fallo de descarga.
+      (sinUrl ? `, ${sinUrl} sin URL de foto` : "") +
       (conUrlSinBajar
         ? `, ${conUrlSinBajar} con URL que no se pudo descargar`
         : "") +
+      (porRespaldo ? " · lista de miembros por historial, no del store" : "") +
       (recortado ? ` (recortado a los ${MAX_ORLA} más activos)` : ""),
   );
 
@@ -498,6 +513,10 @@ async function datosOrla(chatId, sobrescrituras = {}) {
     month: "long",
     year: "numeric",
   });
+
+  // Si el store nos ha dado el nombre, se guarda: así lo aprovechan también
+  // el resumen personal y el chat_name de los mensajes siguientes.
+  if (g.subject) nombresChat.set(chatId, g.subject);
 
   return {
     titulo:
@@ -734,18 +753,60 @@ async function lectorGrupo(id) {
   }
 }
 
+// ---- Acceso al almacén interno, frame a frame ----
+// window.Store no siempre vive en el frame principal: según la versión,
+// WhatsApp Web se carga dentro de un iframe. Cuando eso pasa, TODO lo que
+// whatsapp-web.js resuelve con this.pupPage.evaluate() (getContactById,
+// getProfilePicUrl, getChatById...) devuelve vacío sin lanzar nada visible:
+// la llamada "funciona", simplemente no encuentra el store. Ese es el
+// motivo de que la orla saliera con iniciales y sin nombre de grupo aunque
+// WhatsApp Web lo muestre todo bien.
+//
+// La solución que ya usaba grupoPorStore -recorrer los frames- se extrae
+// aquí para que la usen también las fotos y los nombres. El frame que
+// funciona se recuerda: una orla son decenas de llamadas y no tiene
+// sentido recorrer todos los frames en cada una.
+let frameStore = null;
+
+function contextosStore() {
+  const contextos = [];
+  if (!client.pupPage) return contextos;
+  if (frameStore) contextos.push(frameStore);
+  if (!contextos.includes(client.pupPage)) contextos.push(client.pupPage);
+  try {
+    for (const f of client.pupPage.frames()) {
+      if (f !== client.pupPage.mainFrame() && !contextos.includes(f)) {
+        contextos.push(f);
+      }
+    }
+  } catch (_) {}
+  return contextos;
+}
+
+/**
+ * Evalúa una función DENTRO de la página, en el frame que tenga el store.
+ * @param {Function} fn      código a ejecutar en el navegador
+ * @param {Array} args       argumentos (serializables) para fn
+ * @param {Function} sirve   decide si el resultado es válido
+ */
+async function evaluarEnStore(fn, args = [], sirve = (r) => r != null) {
+  for (const ctx of contextosStore()) {
+    // Un frame recordado que ya no exista lanza aquí: se pasa al siguiente,
+    // así la caché se corrige sola tras una recarga de WhatsApp Web.
+    const res = await ctx.evaluate(fn, ...args).catch(() => null);
+    if (sirve(res)) {
+      frameStore = ctx;
+      return res;
+    }
+  }
+  return null;
+}
+
 /** Ejecuta el lector en el frame principal y, si falla, en cada iframe. */
 async function grupoPorStore(chatId) {
   if (!client.pupPage) return null;
 
-  const contextos = [client.pupPage];
-  try {
-    // Si la app vive en un iframe, el frame principal no ve nada.
-    for (const f of client.pupPage.frames()) {
-      if (f !== client.pupPage.mainFrame()) contextos.push(f);
-    }
-  } catch (_) {}
-
+  const contextos = contextosStore();
   let ultimoError = null;
   for (const ctx of contextos) {
     const res = await ctx
@@ -758,6 +819,7 @@ async function grupoPorStore(chatId) {
       res.participantes &&
       res.participantes.length > 0
     ) {
+      frameStore = ctx;
       console.log(
         `[store] ${chatId}: ${res.total} miembros vía ${res.via}` +
           (res.subject ? ` · "${res.subject}"` : ""),
@@ -775,6 +837,97 @@ async function grupoPorStore(chatId) {
       ` · frames probados: ${contextos.length}`,
   );
   return null;
+}
+
+/**
+ * URL de la foto de perfil (persona o grupo) leída del store.
+ *
+ * No usa client.getProfilePicUrl porque ese evalúa solo en el frame
+ * principal. Además prueba los dos métodos que ha tenido el store según la
+ * versión de WhatsApp Web, y acepta varios nombres de campo: la librería
+ * solo mira 'eurl' y en algunas versiones la imagen viene en otro.
+ */
+async function fotoPerfilPorStore(id) {
+  return evaluarEnStore(
+    async (wid) => {
+      try {
+        const S = window.Store;
+        if (!S || !S.ProfilePic || !S.WidFactory) return null;
+        const w = S.WidFactory.createWid(wid);
+        for (const metodo of [
+          "profilePicFind",
+          "requestProfilePicFromServer",
+        ]) {
+          if (typeof S.ProfilePic[metodo] !== "function") continue;
+          try {
+            const pp = await S.ProfilePic[metodo](w);
+            const url = pp && (pp.eurl || pp.imgFull || pp.img);
+            if (url) return url;
+          } catch (_) {}
+        }
+        return null;
+      } catch (_) {
+        return null;
+      }
+    },
+    [id],
+    (r) => typeof r === "string" && r.length > 0,
+  );
+}
+
+/**
+ * Descarga la imagen desde DENTRO del navegador ya autenticado.
+ *
+ * Respaldo para cuando el fetch desde Node no llega al CDN de WhatsApp
+ * (red del contenedor, enlace que exige la sesión). Ahí dentro la petición
+ * sale igual que la que hace la propia WhatsApp Web al pintar el avatar.
+ */
+async function fotoPorNavegador(url) {
+  return evaluarEnStore(
+    async (u) => {
+      try {
+        const r = await fetch(u);
+        if (!r.ok) return null;
+        const b = await r.blob();
+        if (!b.size) return null;
+        return await new Promise((res) => {
+          const fr = new FileReader();
+          fr.onloadend = () => res(String(fr.result));
+          fr.onerror = () => res(null);
+          fr.readAsDataURL(b);
+        });
+      } catch (_) {
+        return null;
+      }
+    },
+    [url],
+    (r) => typeof r === "string" && r.startsWith("data:"),
+  );
+}
+
+/** Nombre de un contacto leído del store (agenda, o el que se puso él). */
+async function nombreContactoPorStore(id) {
+  return evaluarEnStore(
+    (wid) => {
+      try {
+        const S = window.Store;
+        const c = S && S.Contact && S.Contact.get ? S.Contact.get(wid) : null;
+        if (!c) return null;
+        return (
+          c.name ||
+          c.shortName ||
+          c.pushname ||
+          c.notifyName ||
+          c.verifiedName ||
+          null
+        );
+      } catch (_) {
+        return null;
+      }
+    },
+    [id],
+    (r) => typeof r === "string" && r.trim().length > 0,
+  );
 }
 
 async function adminsPorStore(chatId) {
@@ -849,8 +1002,11 @@ client.on("group_admin_changed", (notification) => {
  */
 async function nombreGrupoPorStore(chatId) {
   if (!client.pupPage) return null;
-  const res = await client.pupPage
-    .evaluate((id) => {
+  // Recorre los frames como grupoPorStore: evaluar solo en el principal era
+  // justamente lo que dejaba el nombre del grupo en blanco cuando WhatsApp
+  // Web vive en un iframe.
+  return evaluarEnStore(
+    (id) => {
       try {
         const S = window.Store;
         if (!S) return null;
@@ -868,9 +1024,10 @@ async function nombreGrupoPorStore(chatId) {
       } catch (_) {
         return null;
       }
-    }, chatId)
-    .catch(() => null);
-  return res || null;
+    },
+    [chatId],
+    (r) => typeof r === "string" && r.trim().length > 0,
+  );
 }
 
 /** Último nombre conocido del grupo guardado en la base de datos. */
