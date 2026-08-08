@@ -544,7 +544,12 @@ async function gruposVigilados() {
     for (const g of GROUP_IDS) if (!ids.includes(g)) ids.push(g);
     ids = ids.filter((id) => GROUP_IDS.includes(id));
   }
-  const lista = ids.map((id) => ({ id, nombre: nombresChat.get(id) || null }));
+  const lista = await Promise.all(
+    ids.map(async (id) => ({
+      id,
+      nombre: await nombreDelChat(null, id).catch(() => null),
+    })),
+  );
   cacheChats = { lista, ts: Date.now() };
   return lista;
 }
@@ -585,7 +590,11 @@ async function gruposDelUsuario(userId) {
     if (!esMiembro) esMiembro = haEscritoAlgunaVez(chat.id, digitos);
 
     if (esMiembro) {
-      salida.push({ id: chat.id, nombre: subject || "Grupo" });
+      // Si de verdad no hay forma de saber el nombre, al menos que cada
+      // grupo se distinga por los últimos dígitos de su id (mejor que
+      // mostrar "Grupo" idéntico en todos, que no hay forma de diferenciar).
+      const generico = `Grupo …${chat.id.replace(/\D/g, "").slice(-4)}`;
+      salida.push({ id: chat.id, nombre: subject || generico });
     }
   }
   return salida;
