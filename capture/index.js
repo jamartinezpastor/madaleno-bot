@@ -307,6 +307,10 @@ client.on("ready", () => {
         console.log(`[sonda] WWebJS expone: ${info.wwebjs.join(", ")}`);
       }
       if (info.error) console.log(`[sonda] Error: ${info.error}`);
+
+      // Si la sonda confirma que no hay Store, se levanta ahora mismo en
+      // vez de esperar a que falle la primera orla.
+      await asegurarStore(true);
     } catch (e) {
       console.error("[sonda] Falló:", e.message);
     }
@@ -736,6 +740,15 @@ async function lectorGrupo(id) {
           meta = await S.GroupMetadata.find(id);
         } catch (_) {}
       }
+      // Último recurso y el más fiable para un bot: pedirle los metadatos
+      // al servidor en vez de esperar a tenerlos ya cargados.
+      if ((!meta || !meta.participants) && S.GroupQueryAndUpdate) {
+        try {
+          const w = S.WidFactory ? S.WidFactory.createWid(id) : id;
+          await S.GroupQueryAndUpdate(w);
+          meta = S.GroupMetadata.get ? S.GroupMetadata.get(id) : meta;
+        } catch (_) {}
+      }
       const models = lista(meta && meta.participants);
       if (models.length > 0) {
         // El nombre se buscaba solo con .get(), que lee la colección local
@@ -812,6 +825,136 @@ async function lectorGrupo(id) {
 // sentido recorrer todos los frames en cada una.
 let frameStore = null;
 
+/**
+ * Reconstruye window.Store. Se ejecuta DENTRO de la página.
+ *
+ * Los logs del servidor dijeron lo que ninguna conjetura acertó: en la
+ * página existen 'WWebJS' y 'require', pero NO 'Store'. Y como todas las
+ * funciones de WWebJS leen window.Store en tiempo de llamada
+ * (getProfilePicThumbToBase64 hace window.Store.ProfilePicThumb.find),
+ * al faltar el Store falla absolutamente todo: nombres, fotos y getChat.
+ *
+ * Por qué falta: ExposeStore de whatsapp-web.js encadena ~60
+ * window.require() sin proteger ninguno. Basta que WhatsApp haya renombrado
+ * un módulo para que la función entera lance y window.Store no se asigne.
+ *
+ * Aquí se pide solo lo que hace falta y cada módulo va protegido: si uno
+ * falta, se pierde esa pieza, no el Store entero. Como efecto secundario
+ * esto repara también los métodos de la propia librería, que vuelven a
+ * encontrar el Store donde lo buscan.
+ */
+function bootstrapStore() {
+  const r = { ya: false, creado: false, modulos: {}, error: null };
+  try {
+    if (window.Store && window.Store.Chat && window.Store.Contact) {
+      r.ya = true;
+      return r;
+    }
+    if (typeof window.require !== "function") {
+      r.error = "window.require no disponible";
+      return r;
+    }
+
+    const pedir = (nombre) => {
+      try {
+        const m = window.require(nombre);
+        r.modulos[nombre] = m ? "ok" : "vacío";
+        return m || null;
+      } catch (e) {
+        r.modulos[nombre] = `error: ${String((e && e.message) || e)}`;
+        return null;
+      }
+    };
+
+    const S =
+      window.Store && typeof window.Store === "object" ? window.Store : {};
+
+    // Chat, Contact, GroupMetadata y ProfilePicThumb salen todos de aquí.
+    const cols = pedir("WAWebCollections");
+    if (cols) Object.assign(S, cols);
+
+    const wid = pedir("WAWebWidFactory");
+    if (wid) S.WidFactory = wid;
+
+    const pp = pedir("WAWebContactProfilePicThumbBridge");
+    if (pp) {
+      S.ProfilePic = pp;
+      if (!S.ProfilePicThumb) S.ProfilePicThumb = pp;
+    }
+
+    // Pide los metadatos del grupo al servidor: imprescindible para un bot
+    // que nunca abre los chats en la interfaz y por tanto no los tiene
+    // cargados en las colecciones locales.
+    const gq = pedir("WAWebGroupQueryJob");
+    if (gq && gq.queryAndUpdateGroupMetadataById) {
+      S.GroupQueryAndUpdate = gq.queryAndUpdateGroupMetadataById;
+    }
+
+    const cm = pedir("WAWebContactGetters");
+    if (cm) S.ContactMethods = cm;
+
+    if (!S.Chat && !S.Contact && !S.GroupMetadata) {
+      r.error = "WAWebCollections no trajo ninguna colección";
+      return r;
+    }
+
+    window.Store = S;
+    r.creado = true;
+    r.claves = Object.keys(S).length;
+    r.tiene = {
+      Chat: !!S.Chat,
+      Contact: !!S.Contact,
+      GroupMetadata: !!S.GroupMetadata,
+      ProfilePic: !!S.ProfilePic,
+      WidFactory: !!S.WidFactory,
+      GroupQueryAndUpdate: !!S.GroupQueryAndUpdate,
+    };
+    return r;
+  } catch (e) {
+    r.error = String((e && e.message) || e);
+    return r;
+  }
+}
+
+// Comprobar el Store en cada lectura sería un evaluate de más por foto y
+// por nombre. Basta con revalidarlo de vez en cuando: si la página se
+// recarga y se lo lleva por delante, se reconstruye en la siguiente ronda.
+let storeVerificado = 0;
+let storeAvisado = 0;
+const STORE_TTL_MS = 30 * 1000;
+
+async function asegurarStore(forzar = false) {
+  if (!client.pupPage) return null;
+  if (!forzar && Date.now() - storeVerificado < STORE_TTL_MS) return null;
+
+  let ultimo = null;
+  for (const ctx of contextosStore()) {
+    const r = await ctx.evaluate(bootstrapStore).catch(() => null);
+    if (r && (r.ya || r.creado)) {
+      frameStore = ctx;
+      storeVerificado = Date.now();
+      if (r.creado && Date.now() - storeAvisado > 60000) {
+        storeAvisado = Date.now();
+        console.log(
+          `[store] Reconstruido con window.require (la librería no lo dejó): ` +
+            `${r.claves} claves · ${JSON.stringify(r.tiene)}`,
+        );
+      }
+      return r;
+    }
+    ultimo = r;
+  }
+
+  if (ultimo && Date.now() - storeAvisado > 60000) {
+    storeAvisado = Date.now();
+    console.error(
+      `[store] No pude reconstruir el Store: ${ultimo.error || "sin respuesta"}` +
+        ` · módulos: ${JSON.stringify(ultimo.modulos || {})}`,
+    );
+  }
+  return ultimo;
+}
+
 function contextosStore() {
   const contextos = [];
   if (!client.pupPage) return contextos;
@@ -834,6 +977,8 @@ function contextosStore() {
  * @param {Function} sirve   decide si el resultado es válido
  */
 async function evaluarEnStore(fn, args = [], sirve = (r) => r != null) {
+  // Sin Store no hay nada que leer: se reconstruye antes de preguntar.
+  await asegurarStore();
   for (const ctx of contextosStore()) {
     // Un frame recordado que ya no exista lanza aquí: se pasa al siguiente,
     // así la caché se corrige sola tras una recarga de WhatsApp Web.
@@ -971,6 +1116,7 @@ async function lectorDiagnostico(id) {
 async function grupoPorStore(chatId) {
   if (!client.pupPage) return null;
 
+  await asegurarStore();
   const contextos = contextosStore();
   let ultimoError = null;
   for (const ctx of contextos) {
@@ -1787,6 +1933,7 @@ app.get("/diag/store", async (req, res) => {
     return res.status(503).json({ error: "El navegador no está listo" });
   }
 
+  const bootstrap = await asegurarStore(true);
   const contextos = contextosStore();
   const frames = [];
   for (const ctx of contextos) {
@@ -1816,7 +1963,13 @@ app.get("/diag/store", async (req, res) => {
       .catch((e) => `error: ${e.message}`);
   }
 
-  res.json({ chatId, framesProbados: contextos.length, frames, efectivo });
+  res.json({
+    chatId,
+    bootstrap,
+    framesProbados: contextos.length,
+    frames,
+    efectivo,
+  });
 });
 
 /**
