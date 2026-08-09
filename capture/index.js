@@ -266,6 +266,13 @@ client.on("ready", () => {
     console.log("[wa] Capturando solo los grupos:", GROUP_IDS.join(", "));
   }
 
+  // Identidades propias (teléfono y LID) en cuanto la sesión está lista.
+  setTimeout(() => {
+    descubrirIdentidades().catch((e) =>
+      console.error("[yo] Descubrimiento falló:", e.message),
+    );
+  }, 3000);
+
   // Sonda única: deja constancia de QUÉ expone realmente la página de
   // WhatsApp Web. Sin esto, cada fallo de lectura obliga a adivinar si
   // falta window.Store, si cambió de nombre o si el problema es otro.
@@ -890,6 +897,48 @@ async function lectorGrupo(id) {
       intentos.push("sin GroupMetadataCollection");
     }
 
+    // Vía B2: getChats() y buscar el nuestro en la lista. getChat(id)
+    // falla con "No key or key range specified" (busca por clave en
+    // IndexedDB con un id que no acepta); listar no hace esa búsqueda.
+    const W2 = window.WWebJS;
+    if (W2 && typeof W2.getChats === "function") {
+      try {
+        const chats = await W2.getChats();
+        const chat = (chats || []).find((c) => {
+          const cid = c && c.id;
+          const s = typeof cid === "string" ? cid : cid && cid._serialized;
+          return s === id;
+        });
+        if (chat) {
+          const models = lista(
+            chat.participants || (chat.groupMetadata || {}).participants,
+          );
+          const nombre =
+            chat.name ||
+            chat.formattedTitle ||
+            chat.subject ||
+            (chat.groupMetadata || {}).subject ||
+            null;
+          if (models.length > 0) {
+            return salida(models, nombre, "WWebJS.getChats");
+          }
+          // Aunque no haya participantes, el nombre ya es un avance.
+          if (nombre) {
+            intentos.push("getChats sin participantes pero con nombre");
+            return {
+              participantes: [],
+              subject: nombre,
+              total: 0,
+              via: "WWebJS.getChats (solo nombre)",
+            };
+          }
+        }
+        intentos.push("getChats: chat no encontrado");
+      } catch (e) {
+        intentos.push("getChats: " + ((e && e.message) || e));
+      }
+    }
+
     // Vía C: WWebJS.getChat. Va la última porque es el mismo camino que
     // usa getChatById, el que falla con el error "r".
     const W = window.WWebJS;
@@ -1213,36 +1262,111 @@ async function atenderPrivado(msg) {
  * configurado, para que el resto del bot vea siempre lo mismo que si se
  * hubiera escrito a mano.
  */
+// ---- Identidades del propio bot ----
+// WhatsApp usa DOS numeraciones para la misma cuenta: el teléfono
+// (34600...@c.us) y el LID (277245...@lid). No comparten dígitos. Si el
+// bot solo conoce una y la mención llega con la otra, no se reconoce a sí
+// mismo y calla: eso es lo que pasaba con "@Madaleno_Bot orla".
+const misIdentidades = new Set();
+
+function registrarIdentidad(id, origen) {
+  const d = util.soloDigitos(id);
+  if (!d || misIdentidades.has(d)) return;
+  misIdentidades.add(d);
+  console.log(`[yo] Identidad propia reconocida: ${id} (${origen})`);
+}
+
+function soyYo(id) {
+  const d = util.soloDigitos(id);
+  return !!d && misIdentidades.has(d);
+}
+
+/** Pregunta a la página por el teléfono y el LID de esta cuenta. */
+async function descubrirIdentidades() {
+  try {
+    const wid = client.info && client.info.wid && client.info.wid._serialized;
+    if (wid) registrarIdentidad(wid, "client.info");
+
+    if (!client.pupPage) return;
+    const ids = await client.pupPage
+      .evaluate(() => {
+        const out = [];
+        const req = (n) => {
+          try {
+            return typeof window.require === "function"
+              ? window.require(n)
+              : null;
+          } catch (e) {
+            return null;
+          }
+        };
+        const anota = (v) => {
+          if (!v) return;
+          const s =
+            v._serialized ||
+            (v.user ? v.user + "@" + (v.server || "c.us") : null);
+          if (s) out.push(s);
+        };
+        try {
+          const M = req("WAWebUserPrefsMeUser");
+          if (M) {
+            if (typeof M.getMeUser === "function") anota(M.getMeUser());
+            if (typeof M.getMaybeMeLidUser === "function")
+              anota(M.getMaybeMeLidUser());
+            if (typeof M.getMeLidUser === "function") anota(M.getMeLidUser());
+          }
+        } catch (e) {}
+        try {
+          if (window.Store && window.Store.User) {
+            const U = window.Store.User;
+            if (U.getMeUser) anota(U.getMeUser());
+            if (U.getMaybeMeLidUser) anota(U.getMaybeMeLidUser());
+          }
+        } catch (e) {}
+        return out;
+      })
+      .catch(() => []);
+
+    for (const id of ids || []) registrarIdentidad(id, "página");
+  } catch (e) {
+    console.error("[yo] No pude descubrir identidades:", e.message);
+  }
+}
+
+/**
+ * Convierte una mención real al bot en el disparador de texto, para que
+ * el resto del código vea siempre lo mismo escriba quien escriba.
+ */
 function normalizarMencionAlBot(msg, textoOriginal) {
   try {
-    const yo = client.info && client.info.wid && client.info.wid._serialized;
-    if (
-      !yo ||
-      !Array.isArray(msg.mentionedIds) ||
-      msg.mentionedIds.length === 0
-    ) {
-      return textoOriginal;
-    }
-    const meMencionan = msg.mentionedIds.some((id) => util.mismoNumero(id, yo));
-    if (!meMencionan) {
-      // Diagnóstico: si esto sale con frecuencia y el mensaje va dirigido
-      // claramente al bot, es probable que mentionedIds use un formato
-      // (LID) distinto al de client.info.wid (número clásico), y esta
-      // normalización no podría detectarlo. Este log ayuda a confirmarlo
-      // sin tener que adivinar.
-      console.log(
-        `[mencion] Mención sin identificar como propia. yo=${yo} ` +
-          `mentionedIds=${msg.mentionedIds.join(",")}`,
-      );
-      return textoOriginal;
-    }
-
     const t = String(textoOriginal || "");
-    // Si ya empieza con el disparador en texto plano, no hay nada que
-    // normalizar (lo escribieron a mano, no es una mención real).
-    if (t.trim().toLowerCase().startsWith(util.TRIGGER)) return t;
+    if (!Array.isArray(msg.mentionedIds) || msg.mentionedIds.length === 0) {
+      return t;
+    }
 
-    return t.replace(/^@\S+\s*/, `${util.TRIGGER} `);
+    const meMencionan = msg.mentionedIds.some((id) => {
+      const s = typeof id === "string" ? id : id && id._serialized;
+      return soyYo(s);
+    });
+
+    if (!meMencionan) {
+      // Puede ser una mención a otra persona: no se toca.
+      return t;
+    }
+
+    if (util.norm(t).startsWith(util.TRIGGER)) return t;
+
+    // Se sustituye el token mencionado (esté donde esté) por el disparador.
+    const digitosMios = [...misIdentidades];
+    const partes = t.split(/\s+/);
+    const idx = partes.findIndex(
+      (p) => p.startsWith("@") && digitosMios.includes(util.soloDigitos(p)),
+    );
+    if (idx >= 0) {
+      partes[idx] = util.TRIGGER;
+      return partes.join(" ");
+    }
+    return `${util.TRIGGER} ${t.replace(/^@\S+\s*/, "")}`;
   } catch (e) {
     console.error("[mencion] Error normalizando:", e.message);
     return textoOriginal;
@@ -1272,6 +1396,11 @@ client.on("message_create", async (msg) => {
   // escribe), el cuerpo crudo no empieza por el disparador de texto. Se
   // normaliza una sola vez y se usa tanto para guardar como para procesar
   // el comando, así el resto del bot no necesita saber nada de menciones.
+  // Un mensaje propio revela nuestro identificador en ESTE grupo, que
+  // puede ser el LID en vez del teléfono. Es la vía más fiable y no
+  // depende de que la página coopere.
+  if (msg.fromMe && authorId) registrarIdentidad(authorId, "mensaje propio");
+
   const bodyNormalizado = normalizarMencionAlBot(msg, msg.body || "");
 
   // ¿Iba dirigido al bot? Tras normalizar, cualquier orden empieza por el

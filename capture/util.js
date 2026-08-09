@@ -1,4 +1,4 @@
-'use strict';
+"use strict";
 
 /**
  * Utilidades compartidas. Antes estaban duplicadas en media docena de
@@ -7,22 +7,29 @@
 
 /** Minúsculas y sin tildes: la forma canónica para comparar texto. */
 function norm(s) {
-  return String(s == null ? '' : s)
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+  return String(s == null ? "" : s)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
     .trim()
     .toLowerCase();
 }
 
-/** Solo los dígitos de un identificador de WhatsApp (34600...@c.us / @lid). */
+/**
+ * Solo los dígitos de un identificador de WhatsApp.
+ *
+ * Sirve tanto para identificadores (34600111222@c.us, 277245...@lid) como
+ * para menciones (@277245...), donde los dígitos van DESPUÉS de la arroba:
+ * dividir por "@" y quedarse con la primera parte devolvía vacío y hacía
+ * que el bot no se reconociera al ser mencionado.
+ */
 function soloDigitos(id) {
-  return String(id || '').split('@')[0].replace(/\D/g, '');
+  return String(id || "").replace(/\D/g, "");
 }
 
 /** ¿Coincide el autor con alguno de la lista, sea cual sea el formato? */
 function mismoNumero(a, b) {
   const x = soloDigitos(a);
-  return x !== '' && x === soloDigitos(b);
+  return x !== "" && x === soloDigitos(b);
 }
 
 /**
@@ -92,53 +99,10 @@ const SQL_CON_CONTENIDO =
   "'call_log','gp2','revoked','ciphertext')";
 
 /** Disparador del bot, centralizado para que todos los módulos vean el mismo. */
-const TRIGGER = (process.env.BOT_TRIGGER || '@madaleno').toLowerCase();
-
-function escapeRegExp(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// Reconoce el disparador como palabra suelta en cualquier punto del texto
-// ("oye @madaleno, ¿qué tal?" o "¿me resumes esto @madaleno?"), no solo al
-// principio. El lookbehind/lookahead evita falsos positivos como
-// "@madalenoso" o un correo "algo@madaleno.com".
-const MENTION_RE = new RegExp(
-  '(^|[\\s¿¡(«"\'])' + escapeRegExp(TRIGGER) + '(?=$|[\\s.,;:!?)»"\'])',
-  'i'
-);
-
-/**
- * Busca el disparador del bot en todo el texto, no solo al principio.
- * Devuelve lo que queda del mensaje al quitar el token de mención (el
- * "comando o pregunta" que el resto del bot debe analizar), o null si el
- * bot no está mencionado.
- *
- * Cuando la mención abre el mensaje se mantiene el comportamiento de
- * siempre (recorte simple, sin tocar mayúsculas ni espacios del resto).
- * Cuando aparece en medio o al final, se quita solo el token y se une lo
- * que quedaba antes y después.
- */
-function detectarMencion(texto) {
-  const trimmed = String(texto == null ? '' : texto).trim();
-  if (!trimmed) return null;
-  // Atajo para el caso de siempre (mención al principio), pero exigiendo
-  // que el disparador termine ahí: "@madalenoso" no debe colar como
-  // mención solo por empezar igual.
-  if (trimmed.toLowerCase().startsWith(TRIGGER)) {
-    const siguiente = trimmed.charAt(TRIGGER.length);
-    if (!siguiente || /[\s.,;:!?)»"']/.test(siguiente)) {
-      return trimmed.slice(TRIGGER.length).trim();
-    }
-  }
-  const m = trimmed.match(MENTION_RE);
-  if (!m) return null;
-  return (trimmed.slice(0, m.index) + ' ' + trimmed.slice(m.index + m[0].length))
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+const TRIGGER = (process.env.BOT_TRIGGER || "@madaleno").toLowerCase();
 
 /** Marca que cierra todos los mensajes del bot. */
-const FIRMA = '🫴🏻🪙';
+const FIRMA = "🫴🏻🪙";
 
 /**
  * Añade la firma al final de cualquier mensaje del bot, en su propia
@@ -146,7 +110,7 @@ const FIRMA = '🫴🏻🪙';
  * vuelve a pasar por aquí).
  */
 function firmar(texto) {
-  const t = String(texto == null ? '' : texto).replace(/\s+$/, '');
+  const t = String(texto == null ? "" : texto).replace(/\s+$/, "");
   if (!t) return t;
   if (t.endsWith(FIRMA)) return t;
   return `${t}\n\n${FIRMA}`;
@@ -160,7 +124,6 @@ module.exports = {
   stmt,
   SQL_CON_CONTENIDO,
   TRIGGER,
-  detectarMencion,
   FIRMA,
   firmar,
 };
