@@ -549,7 +549,10 @@ async function datosOrla(chatId, sobrescrituras = {}) {
       `[orla] Store no disponible, uso ${respaldo.length} miembro(s) por ` +
         "historial de mensajes.",
     );
-    g = { participantes: respaldo, subject: null };
+    // Se conserva el nombre si el store llegó a resolverlo: fallar en los
+    // participantes no es motivo para tirar también el título, que era lo
+    // que dejaba la orla con el nombre genérico aunque se conociera.
+    g = { participantes: respaldo, subject: (g && g.subject) || null };
     porRespaldo = true;
   }
 
